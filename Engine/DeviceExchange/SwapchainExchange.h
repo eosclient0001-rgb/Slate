@@ -14,6 +14,7 @@
 #include <cstdint>
 #include <vector>
 #include <array>
+#include <string>
 
 struct GLFWwindow;
 
@@ -25,10 +26,11 @@ namespace Frontier {
 
 struct SwapchainConfiguration
 {
-    uint32_t    Width;                          // [px]  surface horizontal resolution
-    uint32_t    Height;                         // [px]  surface vertical resolution
-    const char* Title;                          // [-]   window title string
-    bool        ValidationEnabled;              // [-]   Vulkan validation layer activation
+    uint32_t    Width;                          // [px]   surface horizontal resolution
+    uint32_t    Height;                         // [px]   surface vertical resolution
+    const char* Title;                          // [-]    window title string
+    bool        ValidationEnabled;              // [-]    Vulkan validation layer activation
+    std::string ShaderBinaryPath;               // [path] ReSTIR compute SPIR-V binary
 };
 
 //------------------------------------------------------------------------------------------------------------------------
@@ -69,11 +71,14 @@ struct RadianceStructure
     float    _Pad0, _Pad1, _Pad2;                            // [-]     alignment to 48 bytes
 };
 
+static_assert(sizeof(TriangleIndex) == 64u, "TriangleIndex must match the shader's std430 stride");
+static_assert(sizeof(RadianceStructure) == 48u, "RadianceStructure must match the shader's std430 stride");
+
 //------------------------------------------------------------------------------------------------------------------------
 //                                    DISPATCH CONFIGURATION  (compute push constants)
 //
 // 📐 Mechanism: per-frame camera orientation and ReSTIR tuning scalars pushed
-//    directly to the compute shader via vkCmdPushConstants — 80 bytes total.
+//    directly to the compute shader via vkCmdPushConstants — 96 bytes total.
 //------------------------------------------------------------------------------------------------------------------------
 
 struct DispatchConfiguration
@@ -93,8 +98,10 @@ struct DispatchConfiguration
     uint32_t CandidatesPerPixel;                                   // [-]   primary DI candidates per pixel
     uint32_t TriangleCount;                                        // [-]   total triangles in scene
     uint32_t LuminaireTriangleCount;                               // [-]   emissive triangles for DI sampling
-    float    _Pad;                                                 // [-]   alignment to 80 bytes
+    float    _Pad;                                                 // [-]   alignment to 96 bytes
 };
+
+static_assert(sizeof(DispatchConfiguration) == 96u, "DispatchConfiguration must match the shader push-constant block");
 
 //------------------------------------------------------------------------------------------------------------------------
 //                                                  SWAPCHAIN EXCHANGE
@@ -115,15 +122,16 @@ public:
     void                        PollInput(InputExchange& TargetInput) noexcept;
     [[nodiscard]] bool          CloseRequested() const noexcept;
 
-    void                        UploadTriangles   (const std::vector<TriangleIndex>&   Facets)    noexcept;
-    void                        UploadRadiance (const std::vector<RadianceStructure>& Radiances) noexcept;
+    [[nodiscard]] bool          UploadTriangles(const std::vector<TriangleIndex>& Facets) noexcept;
+    [[nodiscard]] bool          UploadRadiance(const std::vector<RadianceStructure>& Radiances) noexcept;
 
-    void                        RecordAndPresent(const DispatchConfiguration& Dispatch) noexcept;
+    [[nodiscard]] bool          RecordAndPresent(const DispatchConfiguration& Dispatch) noexcept;
 
     void                        SignalResize() noexcept { ResizePending = true; }
 
     [[nodiscard]] uint32_t      QueryWidth()  const noexcept { return Configuration.Width;  }
     [[nodiscard]] uint32_t      QueryHeight() const noexcept { return Configuration.Height; }
+    [[nodiscard]] const std::string& QueryLastError() const noexcept { return LastError; }
 
     template<typename TargetType>
     [[nodiscard]] TargetType    Convert() const noexcept;
@@ -144,10 +152,10 @@ private:
     void                RetireSwapchain()       noexcept;
     [[nodiscard]] bool  RebuildSwapchain()      noexcept;
 
-    void                RecordComputeCommands(uint32_t ImageOrdinal,
+    [[nodiscard]] bool  RecordComputeCommands(uint32_t ImageOrdinal,
                                               const DispatchConfiguration& Dispatch) noexcept;
-    void                WriteDescriptorSet()   noexcept;
-    void                ConstructSceneBuffers() noexcept;
+    [[nodiscard]] bool  WriteDescriptorSet() noexcept;
+    [[nodiscard]] bool  ReportFailure(std::string Message) noexcept;
 
     [[nodiscard]] uint32_t ResolveMemoryType(uint32_t TypeMask, uint32_t PropertyMask) const noexcept;
 
@@ -161,14 +169,20 @@ private:
     struct VulkanRecord;
     VulkanRecord*           Vulkan;             // [-]   heap-allocated Vulkan object lifetimes
 
-    GLFWwindow*             GlfwWindow;         // [-]   GLFW window pointer
-    SwapchainConfiguration  Configuration;      // [-]   runtime-tunable surface parameters
-    bool                    ResizePending;       // [-]   framebuffer resize signal
+    GLFWwindow*             GlfwWindow;             // [-]   GLFW window pointer
+    SwapchainConfiguration  Configuration;          // [-]   runtime-tunable surface parameters
+    std::string             LastError;               // [-]   most recent actionable startup/runtime failure
+    bool                    ResizePending;           // [-]   framebuffer resize signal
+    bool                    GlfwInitialised;          // [-]   glfwInit completed
+    bool                    ImGuiContextInitialised;  // [-]   ImGui context exists
+    bool                    ImGuiGlfwInitialised;     // [-]   ImGui GLFW backend initialized
+    bool                    ImGuiVulkanInitialised;   // [-]   ImGui Vulkan backend initialized
+    bool                    SceneDescriptorsReady;   // [-]   descriptor set references both uploaded scene buffers
 
-    InputExchange*          ForwardInput;        // [-]   target for GLFW callback forwarding (valid during PollInput)
-    double                  PreviousCursorX;     // [px]  last known cursor horizontal position
-    double                  PreviousCursorY;     // [px]  last known cursor vertical position
-    bool                    CursorInitialised;   // [-]   first-movement delta suppression
+    InputExchange*          ForwardInput;            // [-]   target for GLFW callback forwarding (valid during PollInput)
+    double                  PreviousCursorX;         // [px]  last known cursor horizontal position
+    double                  PreviousCursorY;         // [px]  last known cursor vertical position
+    bool                    CursorInitialised;       // [-]   first-movement delta suppression
 };
 
 template<>

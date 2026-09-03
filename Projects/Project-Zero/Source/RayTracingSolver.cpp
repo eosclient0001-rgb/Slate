@@ -52,14 +52,16 @@ void RayTracingSolver::ConstructCornellBoxScene() noexcept
     // Right Wall (X = 1, Green, normal -X)
     AppendQuad(Vector3{ 1.0f, 0.0f, 0.0f }, Vector3{ 1.0f, 0.0f, 2.0f }, Vector3{ 1.0f, 2.0f, 2.0f }, Vector3{ 1.0f, 2.0f, 0.0f }, 2);
 
-    // Ceiling Light Quad (Y = 1.995, normal -Y)
-    AppendQuad(Vector3{ -0.30f, 1.995f, 0.70f }, Vector3{ 0.30f, 1.995f, 0.70f }, Vector3{ 0.30f, 1.995f, 1.30f }, Vector3{ -0.30f, 1.995f, 1.30f }, 3);
-
     // Tall Box inside room (Width 0.3, Height 0.6, Depth 0.3, rotated 22 deg)
     AppendBox(Vector3{ -0.35f, 0.6f, 1.35f }, Vector3{ 0.28f, 0.6f, 0.28f }, 22.0f, 4);
 
     // Short Box inside room (Width 0.3, Height 0.3, Depth 0.3, rotated -18 deg)
     AppendBox(Vector3{ 0.35f, 0.3f, 0.75f }, Vector3{ 0.28f, 0.3f, 0.28f }, -18.0f, 5);
+
+    // Light triangles are deliberately appended last; the GPU shader addresses the
+    // final LuminaireTriangleCount records as its direct-light sampling set.
+    AppendQuad(Vector3{ -0.30f, 1.995f, 0.70f }, Vector3{ 0.30f, 1.995f, 0.70f },
+               Vector3{ 0.30f, 1.995f, 1.30f }, Vector3{ -0.30f, 1.995f, 1.30f }, 3);
 }
 
 void RayTracingSolver::AppendTriangle(const Vector3& v0, const Vector3& v1, const Vector3& v2, uint32_t MaterialIdx) noexcept

@@ -63,7 +63,9 @@ VULKAN_SDK="${VULKAN_SDK:-/usr}"
 VULKAN_INC="$VULKAN_SDK/include"
 VULKAN_LIB="$VULKAN_SDK/lib"
 
-# Resolve slangc (prefer SDK, fall back to PATH)
+# Resolve the GLSL compiler (prefer glslc because this .slang file contains GLSL).
+GLSLC="$VULKAN_SDK/bin/glslc"
+if [ ! -x "$GLSLC" ]; then GLSLC="$(command -v glslc 2>/dev/null || true)"; fi
 SLANGC="$VULKAN_SDK/bin/slangc"
 if [ ! -x "$SLANGC" ]; then SLANGC="$(command -v slangc 2>/dev/null || true)"; fi
 
@@ -213,8 +215,23 @@ SLANG_SRC="$ENGINE_ROOT/Shaders/ReSTIRViewport.slang"
 SPV_OUT="$ENGINE_ROOT/Shaders/ReSTIRViewport.spv"
 
 if [ -f "$SLANG_SRC" ]; then
-    if [ -x "$SLANGC" ]; then
-        if [ "$REBUILD" -eq 1 ] || [ ! -f "$SPV_OUT" ] || [ "$SLANG_SRC" -nt "$SPV_OUT" ]; then
+    if [ "$REBUILD" -eq 1 ] || [ ! -f "$SPV_OUT" ] || [ "$SLANG_SRC" -nt "$SPV_OUT" ]; then
+        if [ -x "$GLSLC" ]; then
+            echo "[ToolchainSequence] Compiling ReSTIRViewport.slang as GLSL compute → ReSTIRViewport.spv"
+            TEMP_GLSL="$(mktemp --suffix=.comp)"
+            cp "$SLANG_SRC" "$TEMP_GLSL"
+            if ! "$GLSLC" \
+                    -DFRONTIER_SHADER_TOOLCHAIN=1 \
+                    "-I$ENGINE_ROOT" \
+                    --target-env=vulkan1.2 \
+                    -fshader-stage=compute \
+                    "$TEMP_GLSL" -o "$SPV_OUT"; then
+                rm -f "$TEMP_GLSL"
+                echo "[ToolchainSequence] ERROR: glslc rejected ReSTIRViewport.slang."
+                exit 1
+            fi
+            rm -f "$TEMP_GLSL"
+        elif [ -x "$SLANGC" ]; then
             echo "[ToolchainSequence] Lowering ReSTIRViewport.slang → ReSTIRViewport.spv"
             "$SLANGC" "$SLANG_SRC" \
                 -DFRONTIER_SHADER_TOOLCHAIN=1 \
@@ -222,15 +239,18 @@ if [ -f "$SLANG_SRC" ]; then
                 -target spirv \
                 -profile glsl_450 \
                 -o "$SPV_OUT"
+        elif [ ! -f "$SPV_OUT" ]; then
+            echo "[ToolchainSequence] ERROR: glslc/slangc not found and ReSTIRViewport.spv is absent."
+            exit 1
         else
-            echo "[ToolchainSequence] ReSTIRViewport.slang unchanged — skipping"
+            echo "[ToolchainSequence] WARNING: no shader compiler found — using existing SPV."
         fi
-    elif [ ! -f "$SPV_OUT" ]; then
-        echo "[ToolchainSequence] ERROR: slangc not found and ReSTIRViewport.spv is absent."
-        exit 1
     else
-        echo "[ToolchainSequence] WARNING: slangc not found — using existing SPV."
+        echo "[ToolchainSequence] ReSTIRViewport.slang unchanged — skipping"
     fi
+elif [ ! -f "$SPV_OUT" ]; then
+    echo "[ToolchainSequence] ERROR: ReSTIRViewport.slang and ReSTIRViewport.spv are both absent."
+    exit 1
 fi
 
 #---
@@ -275,6 +295,7 @@ CXXFLAGS=(
     "-fPIC"
     "-DFRONTIER_DEVELOPMENT"
     "-DFRONTIER_ENABLE_GLFW"
+    "-DGLFW_INCLUDE_NONE"
     "${INCLUDES[@]}"
     "${OPT_FLAGS[@]}"
 )
@@ -386,7 +407,11 @@ echo "[ToolchainSequence] Linking $EXE..."
     -lX11 -ldl -lpthread \
     -o "$EXE"
 
+# Keep the renderer self-contained when launched outside the repository root.
+cp "$SPV_OUT" "$BIN_DIR/ReSTIRViewport.spv"
+
 echo "[ToolchainSequence] Build complete: $EXE"
+echo "[ToolchainSequence] Runtime shader: $BIN_DIR/ReSTIRViewport.spv"
 
 #---
 #                                         OPTIONAL RUN

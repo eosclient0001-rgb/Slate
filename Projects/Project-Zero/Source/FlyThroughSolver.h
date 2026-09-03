@@ -36,6 +36,8 @@ public:
     void                    AdvanceLocomotion(const InputExchange& Input, float Δτ) noexcept;
     void                    AdvanceProjection(float Δτ) noexcept override;
 
+    // Project-Zero's Cornell box uses +Y up and +Z forward.
+    void                    AssignOrientationEuler(float PitchRadians, float YawRadians, float RollRadians) noexcept;
     void                    AssignFlightSpeed(float SpeedMetersPerSec) noexcept;
 
     [[nodiscard]] float     QueryFlightSpeed() const noexcept { return CurrentFlightSpeed; }

@@ -18,60 +18,58 @@ Control Centre** overlay.
 
 ---
 
-## Build — Windows (PowerShell 7)
+## Build — Windows (PowerShell 5.1 or 7+)
 
 ```powershell
 # From the repository root (Frontier/)
-pwsh -NoProfile -ExecutionPolicy Bypass `
-     -File Projects/Project-Zero/Build/Construct.ps1 `
-     -Configuration Release
+powershell -NoProfile -ExecutionPolicy Bypass `
+  -File Projects/Project-Zero/Build/ToolchainSequence.ps1 `
+  -Configuration Release -Rebuild
 
 # Build + launch immediately
-pwsh -NoProfile -ExecutionPolicy Bypass `
-     -File Projects/Project-Zero/Build/Construct.ps1 `
-     -Configuration Release -Run
-
-# Rebuild from scratch
-pwsh -NoProfile -ExecutionPolicy Bypass `
-     -File Projects/Project-Zero/Build/Construct.ps1 `
-     -Configuration Release -Rebuild
+powershell -NoProfile -ExecutionPolicy Bypass `
+  -File Projects/Project-Zero/Build/ToolchainSequence.ps1 `
+  -Configuration Release -Rebuild -Run
 ```
 
-> **Requirement:** `VULKAN_SDK` and `VCPKG_ROOT` environment variables must be set.
+The build uses MSVC directly and discovers the latest installed Vulkan SDK. It
+also builds GLFW when needed and packages both `glfw3.dll` and
+`ReSTIRViewport.spv` beside the executable.
 
 ---
 
 ## Build — Linux (Bash)
 
 ```bash
-# Install dependencies (Ubuntu/Debian)
-sudo apt install -y libvulkan-dev glslc libglfw3-dev libthorvg-dev pkg-config cmake
-
-# Clone ImGui if not already present
-git clone https://github.com/ocornut/imgui.git ThirdParty/imgui
-
-# Build from the repository root
-bash Projects/Project-Zero/Build/LinuxBuild.sh Release
+# Initialize the pinned dependencies, then build from the repository root
+# (a Vulkan SDK, glslc/slangc, CMake, and X11 development headers are required)
+git submodule update --init --recursive
+bash Projects/Project-Zero/Build/ToolchainSequence.sh release --rebuild
 
 # Build + launch
-bash Projects/Project-Zero/Build/LinuxBuild.sh Release --run
+bash Projects/Project-Zero/Build/ToolchainSequence.sh release --run
 ```
 
 ---
 
 ## Runtime
 
-Run from the **repository root** (`Frontier/`) so the SPIR-V path resolves:
+The packaged runtime is self-contained and may be launched from PowerShell,
+CMD, or by double-clicking the executable:
 
-```
-Projects/Project-Zero/bin/Project-Zero       (Linux)
-Projects\Project-Zero\bin\Project-Zero.exe   (Windows)
+```text
+Projects\Project-Zero\Build\Output\Windows\Release\Binary\
+  Project-Zero.exe
+  glfw3.dll
+  ReSTIRViewport.spv
+  Diagnostics\ProjectZero_TelemetryReport.md   (created on launch)
 ```
 
-The shader binary is expected at:
-```
-Shaders/ReSTIRViewport.spv   (relative to working directory = repo root)
-```
+`Project-Zero.exe` intentionally uses the Windows **console subsystem**. A
+console and a separate native GLFW/Vulkan window remain open together. Startup
+stages are echoed to the console, while lifecycle milestones and the final
+failure reason are persisted in the diagnostic report. If a Vulkan/GLFW stage
+fails, both outputs include the exact failed API operation and error code.
 
 ---
 

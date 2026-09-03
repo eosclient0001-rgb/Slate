@@ -10,25 +10,101 @@
 #include "FlyThroughSolver.h"
 #include "RayTracingSolver.h"
 
+#include <array>
 #include <chrono>
+#include <filesystem>
+#include <iostream>
 
-int main(int, char**)
+#if defined(_WIN32)
+    #include <windows.h>
+#endif
+
+namespace {
+
+std::filesystem::path ResolveBinaryDirectory(int ArgumentCount, char** ArgumentValues)
 {
+    try
+    {
+#if defined(_WIN32)
+        // argv[0] may be only a command name when launched through PATH. Ask the
+        // Windows loader for the actual module so packaged assets always resolve.
+        std::array<wchar_t, 32768u> ModulePath{};
+        const DWORD ModulePathLength = GetModuleFileNameW(
+            nullptr, ModulePath.data(), static_cast<DWORD>(ModulePath.size()));
+        if (ModulePathLength > 0u && ModulePathLength < ModulePath.size())
+        {
+            return std::filesystem::path(
+                ModulePath.data(), ModulePath.data() + ModulePathLength).parent_path();
+        }
+#endif
+        if (ArgumentCount > 0 && ArgumentValues && ArgumentValues[0] && ArgumentValues[0][0] != '\0')
+        {
+            std::filesystem::path ExecutablePath = std::filesystem::absolute(ArgumentValues[0]);
+            if (std::filesystem::exists(ExecutablePath))
+                ExecutablePath = std::filesystem::weakly_canonical(ExecutablePath);
+            if (ExecutablePath.has_parent_path())
+                return ExecutablePath.parent_path();
+        }
+        return std::filesystem::current_path();
+    }
+    catch (...)
+    {
+        return ".";
+    }
+}
+
+std::filesystem::path ResolveShaderPath(const std::filesystem::path& BinaryDirectory)
+{
+    const std::filesystem::path PackagedShader = BinaryDirectory / "ReSTIRViewport.spv";
+    if (std::filesystem::exists(PackagedShader)) return PackagedShader;
+
+    const std::filesystem::path DevelopmentShader =
+        std::filesystem::current_path() / "Engine" / "Shaders" / "ReSTIRViewport.spv";
+    if (std::filesystem::exists(DevelopmentShader)) return DevelopmentShader;
+
+    // Preserve the packaged location in the error message when neither candidate exists.
+    return PackagedShader;
+}
+
+} // namespace
+
+int main(int ArgumentCount, char** ArgumentValues)
+{
+    const std::filesystem::path BinaryDirectory =
+        ResolveBinaryDirectory(ArgumentCount, ArgumentValues);
+    const std::filesystem::path ShaderPath = ResolveShaderPath(BinaryDirectory);
+    const std::filesystem::path DiagnosticDirectory = BinaryDirectory / "Diagnostics";
+    const std::filesystem::path DiagnosticPath =
+        DiagnosticDirectory / "ProjectZero_TelemetryReport.md";
+
+    std::cout << "Project-Zero | Frontier Engine\n"
+              << "  Binary directory : " << BinaryDirectory.string() << "\n"
+              << "  Shader binary    : " << ShaderPath.string() << "\n"
+              << "  Diagnostic log   : " << DiagnosticPath.string() << "\n"
+              << std::flush;
+
     //──────────────────────────────────────────────────────────────────────────
-    // Telemetry sink
+    // Telemetry sink — file output and console echo stay active together.
     //──────────────────────────────────────────────────────────────────────────
     Frontier::DiagnosticConfiguration DiagnosticConfig{};
-    DiagnosticConfig.DestinationFolder          = "Diagnostics";
+    DiagnosticConfig.DestinationFolder          = DiagnosticDirectory.string();
     DiagnosticConfig.OutputFileStem             = "ProjectZero_TelemetryReport";
     DiagnosticConfig.FileExtension              = ".md";
     DiagnosticConfig.TimestampPrefixEnabled     = true;
-    DiagnosticConfig.ConsoleEchoEnabled         = false;
+    DiagnosticConfig.ConsoleEchoEnabled         = true;
     DiagnosticConfig.MarkdownTableFormatEnabled = true;
 
     Frontier::DiagnosticMetrics Logger(DiagnosticConfig);
-    Logger.InitializeSink();
+    if (!Logger.InitializeSink())
+    {
+        std::cerr << "[FATAL] [Bootstrap] Could not create the diagnostic log at "
+                  << DiagnosticDirectory.string() << "\n";
+        return 1;
+    }
     Logger.RecordMessage(Frontier::DiagnosticSeverity::Information,
                          "Bootstrap", "Project-Zero windowed ReSTIR renderer starting.");
+    Logger.RecordMessage(Frontier::DiagnosticSeverity::Information,
+                         "Bootstrap", "Shader: " + ShaderPath.string());
 
     //──────────────────────────────────────────────────────────────────────────
     // Scene — Cornell Box (CPU analytical geometry, uploaded once to GPU SSBOs)
@@ -45,7 +121,7 @@ int main(int, char**)
         Frontier::ReSTIRIntegrator::CountLuminaireTriangles(Scene);
 
     //──────────────────────────────────────────────────────────────────────────
-    // Camera — Unreal-style fly-through, right-handed +Z up
+    // Camera — Cornell-box fly-through, +Y up and +Z forward
     //──────────────────────────────────────────────────────────────────────────
     Frontier::ProjectZero::FlyThroughConfiguration CameraConfig
     {
@@ -83,7 +159,8 @@ int main(int, char**)
         1280u,
         720u,
         "Project-Zero  |  ReSTIR GI  |  Frontier Engine",
-        false       // validation layers — set true for debugging
+        false,      // validation layers — set true for debugging
+        ShaderPath.string()
     };
 
     Frontier::SwapchainExchange Surface(SurfaceConfig);
@@ -91,13 +168,21 @@ int main(int, char**)
     if (!Surface.Bring())
     {
         Logger.RecordMessage(Frontier::DiagnosticSeverity::Fatal,
-                             "Bootstrap", "SwapchainExchange bring-up failed.");
+                             "Bootstrap", "Renderer bring-up failed: " + Surface.QueryLastError());
         Logger.TerminateSink();
         return 1;
     }
 
-    Surface.UploadTriangles(GpuTriangles);
-    Surface.UploadRadiance(GpuMaterials);
+    Logger.RecordMessage(Frontier::DiagnosticSeverity::Information,
+                         "Bootstrap", "Native GLFW window and Vulkan renderer initialized.");
+
+    if (!Surface.UploadTriangles(GpuTriangles) || !Surface.UploadRadiance(GpuMaterials))
+    {
+        Logger.RecordMessage(Frontier::DiagnosticSeverity::Fatal,
+                             "Bootstrap", "Scene upload failed: " + Surface.QueryLastError());
+        Logger.TerminateSink();
+        return 1;
+    }
 
     //──────────────────────────────────────────────────────────────────────────
     // ImGui panel — apply theme once after context exists
@@ -124,6 +209,7 @@ int main(int, char**)
     using Duration = std::chrono::duration<float>;
 
     auto PreviousTime = Clock::now();
+    bool RenderSucceeded = true;
 
     while (!Surface.CloseRequested() && !Panel.Convert<bool>())
     {
@@ -156,7 +242,13 @@ int main(int, char**)
             LuminaireCount);
 
         // ⑤ Dispatch compute, blit to swapchain, submit ImGui, present
-        Surface.RecordAndPresent(Dispatch);
+        if (!Surface.RecordAndPresent(Dispatch))
+        {
+            Logger.RecordMessage(Frontier::DiagnosticSeverity::Fatal,
+                                 "Renderer", "Frame presentation failed: " + Surface.QueryLastError());
+            RenderSucceeded = false;
+            break;
+        }
 
         Integrator.IncrementAccumulationIndex();
     }
@@ -166,9 +258,11 @@ int main(int, char**)
     //──────────────────────────────────────────────────────────────────────────
     Surface.Retire();
 
-    Logger.RecordMessage(Frontier::DiagnosticSeverity::Information,
-                         "Shutdown", "Render loop exited cleanly.");
+    Logger.RecordMessage(
+        RenderSucceeded ? Frontier::DiagnosticSeverity::Information : Frontier::DiagnosticSeverity::Fatal,
+        "Shutdown",
+        RenderSucceeded ? "Render loop exited cleanly." : "Render loop stopped after a renderer failure.");
     Logger.TerminateSink();
 
-    return 0;
+    return RenderSucceeded ? 0 : 1;
 }

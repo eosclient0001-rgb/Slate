@@ -2,9 +2,13 @@
 *.o
 *.obj
 *.exe
+*.dll
+*.pdb
+*.spv
 *.a
 *.lib
 *.ppm
+Projects/**/Build/Output/
 bin/
 build/
 Projects/**/bin/

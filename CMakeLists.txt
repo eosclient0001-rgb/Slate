@@ -114,14 +114,30 @@ set(IMGUI_SOURCES
 # ─── Vulkan ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 find_package(Vulkan REQUIRED)
 
-# ─── Slang shader lowering — .slang → SPIR-V ────────────────────────────────────────────────────────────────────────────────────────────────
+# ─── Shader lowering — the .slang file is GLSL source, compiled to SPIR-V ───────────────────────────────────────────────────────────────────
+find_program(GLSLC_EXECUTABLE glslc
+    HINTS "$ENV{VULKAN_SDK}/bin" "/usr/bin" "/usr/local/bin")
 find_program(SLANGC_EXECUTABLE slangc
     HINTS "$ENV{VULKAN_SDK}/bin" "/usr/bin" "/usr/local/bin")
 
 set(SLANG_SRC "${CMAKE_SOURCE_DIR}/Engine/Shaders/ReSTIRViewport.slang")
 set(SPV_OUT   "${CMAKE_SOURCE_DIR}/Engine/Shaders/ReSTIRViewport.spv")
+set(GLSLC_STAGE_SOURCE "${CMAKE_BINARY_DIR}/ReSTIRViewport.comp")
 
-if(SLANGC_EXECUTABLE AND EXISTS "${SLANG_SRC}")
+if(GLSLC_EXECUTABLE AND EXISTS "${SLANG_SRC}")
+    add_custom_command(
+        OUTPUT  "${SPV_OUT}"
+        COMMAND "${CMAKE_COMMAND}" -E copy_if_different "${SLANG_SRC}" "${GLSLC_STAGE_SOURCE}"
+        COMMAND "${GLSLC_EXECUTABLE}"
+                "-DFRONTIER_SHADER_TOOLCHAIN=1"
+                "-I${CMAKE_SOURCE_DIR}/Engine"
+                --target-env=vulkan1.2 -fshader-stage=compute
+                "${GLSLC_STAGE_SOURCE}" -o "${SPV_OUT}"
+        DEPENDS "${SLANG_SRC}"
+        COMMENT "[Project-Zero] Compiling ReSTIRViewport.slang as GLSL compute → SPIR-V"
+        VERBATIM)
+    add_custom_target(ReSTIRViewportSpirv DEPENDS "${SPV_OUT}")
+elseif(SLANGC_EXECUTABLE AND EXISTS "${SLANG_SRC}")
     add_custom_command(
         OUTPUT  "${SPV_OUT}"
         COMMAND "${SLANGC_EXECUTABLE}"
@@ -135,7 +151,7 @@ if(SLANGC_EXECUTABLE AND EXISTS "${SLANG_SRC}")
         VERBATIM)
     add_custom_target(ReSTIRViewportSpirv DEPENDS "${SPV_OUT}")
 else()
-    message(WARNING "[Project-Zero] slangc not found or ReSTIRViewport.slang absent — SPV must be pre-compiled.")
+    message(WARNING "[Project-Zero] glslc/slangc not found or ReSTIRViewport.slang absent — SPV must be pre-compiled.")
     add_custom_target(ReSTIRViewportSpirv)
 endif()
 
@@ -206,6 +222,11 @@ set(PROJECT_ZERO_SOURCES
 
 add_executable(Project-Zero ${PROJECT_ZERO_SOURCES})
 add_dependencies(Project-Zero ReSTIRViewportSpirv)
+add_custom_command(TARGET Project-Zero POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${SPV_OUT}"
+            "$<TARGET_FILE_DIR:Project-Zero>/ReSTIRViewport.spv"
+    COMMENT "[Project-Zero] Packaging ReSTIRViewport.spv beside the executable")
 
 target_include_directories(Project-Zero PRIVATE
     ${FRONTIER_ENGINE_INCLUDES}
@@ -222,6 +243,7 @@ target_include_directories(Project-Zero PRIVATE
 target_compile_definitions(Project-Zero PRIVATE
     FRONTIER_DEVELOPMENT
     FRONTIER_ENABLE_GLFW
+    GLFW_INCLUDE_NONE
 )
 
 target_link_libraries(Project-Zero PRIVATE

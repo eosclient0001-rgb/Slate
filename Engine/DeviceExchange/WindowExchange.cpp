@@ -16,6 +16,9 @@
 #endif
 
 #if defined(FRONTIER_ENABLE_GLFW) && __has_include(<GLFW/glfw3.h>)
+    #ifndef GLFW_INCLUDE_NONE
+        #define GLFW_INCLUDE_NONE
+    #endif
     #include <GLFW/glfw3.h>
 #elif defined(__linux__) && __has_include(<X11/Xlib.h>)
     #define FRONTIER_ENABLE_X11 1

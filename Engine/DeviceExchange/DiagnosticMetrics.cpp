@@ -128,6 +128,13 @@ void DiagnosticMetrics::RecordMessage(DiagnosticSeverity Severity, std::string_v
     }
 
     TotalRecordsWritten++;
+    // Keep crash diagnostics durable; startup failures must not leave a header-only report.
+    FileStream.flush();
+    if (Config.ConsoleEchoEnabled)
+    {
+        std::cout.flush();
+        std::cerr.flush();
+    }
 }
 
 void DiagnosticMetrics::RecordMeasurement(std::string_view MeasurementToken, double NumericMagnitude, std::string_view UnitAnnotation) noexcept

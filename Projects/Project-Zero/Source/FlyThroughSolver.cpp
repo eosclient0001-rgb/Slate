@@ -25,6 +25,7 @@ FlyThroughSolver::FlyThroughSolver() noexcept
     , CurrentFlightSpeed(2.5f)
     , SteeringActive(false)
 {
+    AssignOrientationEuler(0.0f, 0.0f, 0.0f);
 }
 
 FlyThroughSolver::FlyThroughSolver(const FlyThroughConfiguration& InitialConfig) noexcept
@@ -34,6 +35,7 @@ FlyThroughSolver::FlyThroughSolver(const FlyThroughConfiguration& InitialConfig)
     , CurrentFlightSpeed(InitialConfig.BaseFlightSpeed)
     , SteeringActive(false)
 {
+    AssignOrientationEuler(0.0f, 0.0f, 0.0f);
 }
 
 //------------------------------------------------------------------------------------------------------------------------
@@ -75,9 +77,9 @@ void FlyThroughSolver::AdvanceLocomotion(const InputExchange& Input, float Δτ)
     if (Input.IsKeyPressed(VirtualKeyCategory::KeyD)) DesiredDirection += RightVector;
     if (Input.IsKeyPressed(VirtualKeyCategory::KeyA)) DesiredDirection -= RightVector;
 
-    // Vertical Up (E) / Down (Q) — Strict +Z Up Axis
-    if (Input.IsKeyPressed(VirtualKeyCategory::KeyE)) DesiredDirection += Vector3{ 0.0f, 0.0f, 1.0f };
-    if (Input.IsKeyPressed(VirtualKeyCategory::KeyQ)) DesiredDirection -= Vector3{ 0.0f, 0.0f, 1.0f };
+    // Vertical Up (E) / Down (Q) — Cornell-box +Y up axis
+    if (Input.IsKeyPressed(VirtualKeyCategory::KeyE)) DesiredDirection += Vector3{ 0.0f, 1.0f, 0.0f };
+    if (Input.IsKeyPressed(VirtualKeyCategory::KeyQ)) DesiredDirection -= Vector3{ 0.0f, 1.0f, 0.0f };
 
     float LengthSq = DesiredDirection.LengthSquared();
     if (LengthSq > 1e-6f)
@@ -105,6 +107,26 @@ void FlyThroughSolver::AdvanceLocomotion(const InputExchange& Input, float Δτ)
 void FlyThroughSolver::AdvanceProjection(float Δτ) noexcept
 {
     (void)Δτ;
+}
+
+void FlyThroughSolver::AssignOrientationEuler(float InPitch, float InYaw, float InRoll) noexcept
+{
+    constexpr float MaxPitch = 89.0f * (3.14159265359f / 180.0f);
+    PitchRadians = std::clamp(InPitch, -MaxPitch, MaxPitch);
+    YawRadians   = InYaw;
+    RollRadians  = InRoll;
+
+    const float CosPitch = std::cos(PitchRadians);
+    const float SinPitch = std::sin(PitchRadians);
+    const float CosYaw   = std::cos(YawRadians);
+    const float SinYaw   = std::sin(YawRadians);
+
+    // The Cornell scene is authored X-right, Y-up, Z-forward. Keep this local
+    // basis distinct from CameraProjection's engine-wide Z-up convention.
+    ForwardVector = Vector3{ SinYaw * CosPitch, SinPitch, CosYaw * CosPitch }.Normalized();
+    constexpr Vector3 WorldUp{ 0.0f, 1.0f, 0.0f };
+    RightVector  = OrientationClassifier::CrossProduct(WorldUp, ForwardVector).Normalized();
+    UpwardVector = OrientationClassifier::CrossProduct(ForwardVector, RightVector).Normalized();
 }
 
 void FlyThroughSolver::AssignFlightSpeed(float SpeedMetersPerSec) noexcept

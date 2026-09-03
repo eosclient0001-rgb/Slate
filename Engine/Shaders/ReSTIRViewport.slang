@@ -1,5 +1,5 @@
 //============================================================================================================================================
-// 📦 Project-Zero/Shaders/ReSTIRViewport.glsl — ReSTIR DI+GI Cornell Box Compute Shader Writing Directly to Swapchain Storage Image
+// 📦 Project-Zero/Shaders/ReSTIRViewport.glsl — ReSTIR DI+GI Cornell Box Compute Shader Writing to a Blitted Storage Image
 //============================================================================================================================================
 // NOTE: This file is the GLSL source; it is compiled to SPIR-V by the build scripts via glslc.
 // glslc --target-env=vulkan1.2 ReSTIRViewport.glsl -o ReSTIRViewport.spv
@@ -11,7 +11,7 @@ layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
 //                                                    STORAGE IMAGE OUTPUT
 //------------------------------------------------------------------------------------------------------------------------
 
-layout(rgba8, binding = 0) uniform writeonly image2D OutputImage;   // swapchain storage image
+layout(rgba8, binding = 0) uniform writeonly image2D OutputImage;   // offscreen image blitted to swapchain
 
 //------------------------------------------------------------------------------------------------------------------------
 //                                                    SCENE GEOMETRY BINDING
@@ -27,8 +27,9 @@ struct GpuTriangle
 
 struct GpuMaterial
 {
-    vec4 albedo;        // xyz = albedo rgb, w = roughness
-    vec4 emissive;      // xyz = emissive radiance, w = metallic
+    vec4  albedo;       // xyz = albedo rgb, w = roughness
+    vec4  emissive;     // xyz = emissive radiance, w = metallic
+    uvec4 metadata;     // x = material identifier, yzw = padding (48-byte CPU stride)
 };
 
 layout(std430, binding = 1) readonly buffer TriangleExtent  { GpuTriangle Triangles[]; };
@@ -253,7 +254,7 @@ void main()
     uint seed = MakeSeed(pixel, FrameIndex);
 
     //------------------------------------------------------------------------------------------------------------------
-    // 1. Generate primary ray (pinhole camera — right-handed, Z-up, Vulkan NDC Y-inverted)
+    // 1. Generate primary ray (pinhole camera — Cornell scene Y-up, Vulkan NDC Y-inverted)
     //------------------------------------------------------------------------------------------------------------------
     float u = (float(pixel.x) + RandFloat(seed)) / float(ViewportWidth);
     float v = (float(pixel.y) + RandFloat(seed)) / float(ViewportHeight);

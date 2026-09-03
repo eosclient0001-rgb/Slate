@@ -4,6 +4,7 @@
 // 🧩 Accumulates ReSTIR DI+GI radiance by numerically integrating light transport paths on the GPU compute pipeline.
 
 #include "ReSTIRIntegrator.h"
+#include <bit>
 #include <cmath>
 
 namespace Frontier {
@@ -103,11 +104,11 @@ std::vector<TriangleIndex> ReSTIRIntegrator::BuildTriangleIndex(
         Record.VertexAlphaX  = Triangle.VertexAlpha.x;
         Record.VertexAlphaY  = Triangle.VertexAlpha.y;
         Record.VertexAlphaZ  = Triangle.VertexAlpha.z;
-        Record.MaterialSlot  = *reinterpret_cast<const float*>(&Triangle.MaterialIndex);
+        Record.MaterialSlot  = std::bit_cast<float>(Triangle.MaterialIndex);
         Record.VertexBetaX   = Triangle.VertexBeta.x;
         Record.VertexBetaY   = Triangle.VertexBeta.y;
         Record.VertexBetaZ   = Triangle.VertexBeta.z;
-        Record.TriangleSlot  = *reinterpret_cast<const float*>(&Triangle.TriangleIndex);
+        Record.TriangleSlot  = std::bit_cast<float>(Triangle.TriangleIndex);
         Record.VertexGammaX  = Triangle.VertexGamma.x;
         Record.VertexGammaY  = Triangle.VertexGamma.y;
         Record.VertexGammaZ  = Triangle.VertexGamma.z;

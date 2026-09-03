@@ -59,7 +59,10 @@ function Import-ToolchainEnvironment
         'C:\Program Files\Microsoft Visual Studio\18\Community\VC\Auxiliary\Build\vcvarsall.bat'
         'C:\Program Files\Microsoft Visual Studio\18\Professional\VC\Auxiliary\Build\vcvarsall.bat'
         'C:\Program Files\Microsoft Visual Studio\18\Enterprise\VC\Auxiliary\Build\vcvarsall.bat'
+        'C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools\VC\Auxiliary\Build\vcvarsall.bat'
         'C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvarsall.bat'
+        'C:\Program Files\Microsoft Visual Studio\2022\Professional\VC\Auxiliary\Build\vcvarsall.bat'
+        'C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvarsall.bat'
         'C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvarsall.bat'
     )
 
@@ -138,6 +141,7 @@ function Get-CompilationFlags([string] $Selection)
         '/Zc:__cplusplus'
         '/DWIN32_LEAN_AND_MEAN'
         '/DNOMINMAX'
+        '/DGLFW_INCLUDE_NONE'
         '/DGLFW_DLL'
         '/DFRONTIER_DEVELOPMENT'
         '/DFRONTIER_ENABLE_GLFW'
@@ -360,6 +364,7 @@ function Invoke-ShaderLowering([string] $VulkanRoot)
 
     # Determine compiler arguments based on which tool we have
     $CompilerName = [System.IO.Path]::GetFileName($Compiler)
+    $TempSrc = $null
     if ($CompilerName -eq 'glslc.exe')
     {
         # glslc requires a recognized extension (.glsl/.vert/.frag/.comp)
@@ -391,8 +396,14 @@ function Invoke-ShaderLowering([string] $VulkanRoot)
     }
 
     & $Compiler @Arguments | ForEach-Object { Write-Host "    $_" }
+    $ShaderExitCode = $LASTEXITCODE
 
-    if ($LASTEXITCODE -ne 0)
+    if ($TempSrc -and (Test-Path $TempSrc))
+    {
+        Remove-Item $TempSrc -Force -ErrorAction SilentlyContinue
+    }
+
+    if ($ShaderExitCode -ne 0)
     {
         Write-Rejected "$CompilerName rejected ReSTIRViewport.slang"
         throw "$CompilerName rejected ReSTIRViewport.slang"
@@ -499,12 +510,15 @@ if (-not $UpdateOk)
 }
 Pop-Location
 
-# Build GLFW DLL if absent
+# Build GLFW DLL if either half of the runtime/import-library pair is absent.
 $GlfwLib = Join-Path $PackageRoot 'glfw\lib-vc2022\glfw3dll.lib'
-if ((-not (Test-Path $GlfwLib)) -and (-not $script:GlfwBuilt))
+$GlfwDll = Join-Path $PackageRoot 'glfw\lib-vc2022\glfw3.dll'
+if (($Rebuild -or (-not (Test-Path $GlfwLib)) -or (-not (Test-Path $GlfwDll))) -and (-not $script:GlfwBuilt))
 {
-    Write-Building 'GLFW binaries absent - invoking BuildGLFW.ps1'
-    $ExitCode = Invoke-DependencyScript (Join-Path $ScriptRoot 'BuildGLFW.ps1') @()
+    Write-Building 'Building the x64 GLFW runtime with the active Visual Studio toolchain'
+    $GlfwBuildArguments = @()
+    if ($Rebuild) { $GlfwBuildArguments += '-Rebuild' }
+    $ExitCode = Invoke-DependencyScript (Join-Path $ScriptRoot 'BuildGLFW.ps1') $GlfwBuildArguments
     if ($ExitCode -ne 0) { throw 'BuildGLFW.ps1 failed' }
     $script:GlfwBuilt = $true
 }
@@ -609,9 +623,16 @@ New-Item -ItemType Directory -Force -Path $BinaryRoot | Out-Null
 
 $ExePath = Join-Path $BinaryRoot 'Project-Zero.exe'
 
-# Copy GLFW DLL beside executable
-$GlfwDll = Join-Path $PackageRoot 'glfw\lib-vc2022\glfw3.dll'
-if (Test-Path $GlfwDll) { Copy-Item $GlfwDll $BinaryRoot -Force }
+# Validate every runtime dependency before replacing a previous executable.
+if (-not (Test-Path $GlfwDll))
+{
+    throw "GLFW runtime DLL is missing at $GlfwDll"
+}
+$ShaderBinary = Join-Path $EngineRoot 'Shaders\ReSTIRViewport.spv'
+if (-not (Test-Path $ShaderBinary))
+{
+    throw "compiled shader is missing at $ShaderBinary"
+}
 
 if (Test-Path $ExePath)
 {
@@ -652,10 +673,30 @@ if ($LASTEXITCODE -ne 0)
     throw 'link.exe rejected Project-Zero'
 }
 
+# Package beside the freshly linked executable so Explorer/double-click launches
+# do not depend on the caller's working directory or PATH.
+Copy-Item $GlfwDll $BinaryRoot -Force
+Copy-Item $ShaderBinary (Join-Path $BinaryRoot 'ReSTIRViewport.spv') -Force
+
 Write-Produced $ExePath
+Write-Produced (Join-Path $BinaryRoot 'glfw3.dll')
+Write-Produced (Join-Path $BinaryRoot 'ReSTIRViewport.spv')
 
 if ($Run)
 {
-    Write-Building 'Launching Project-Zero...'
-    & "$ExePath"
+    Write-Building 'Launching Project-Zero (native window + console + file log)...'
+    Push-Location $BinaryRoot
+    try
+    {
+        & "$ExePath"
+        $RunExitCode = $LASTEXITCODE
+    }
+    finally
+    {
+        Pop-Location
+    }
+    if ($RunExitCode -ne 0)
+    {
+        throw "Project-Zero exited with code $RunExitCode; inspect Binary\Diagnostics\ProjectZero_TelemetryReport.md"
+    }
 }

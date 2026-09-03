@@ -8,7 +8,9 @@
 #     powershell -File Scripts\BuildGLFW.ps1
 
 [CmdletBinding()]
-param()
+param(
+    [switch] $Rebuild
+)
 
 $ErrorActionPreference = 'Stop'
 
@@ -36,8 +38,13 @@ if (-not (Get-Command cmake.exe -ErrorAction SilentlyContinue))
 {
     $CmakeCandidates = @(
         'C:\Program Files\Microsoft Visual Studio\18\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin',
+        'C:\Program Files\Microsoft Visual Studio\18\Professional\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin',
+        'C:\Program Files\Microsoft Visual Studio\18\Enterprise\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin',
+        'C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin',
         'C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin',
-        'C:\Program Files\Microsoft Visual Studio\2022\Professional\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin'
+        'C:\Program Files\Microsoft Visual Studio\2022\Professional\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin',
+        'C:\Program Files\Microsoft Visual Studio\2022\Enterprise\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin',
+        'C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin'
     )
     foreach ($Cand in $CmakeCandidates)
     {
@@ -68,12 +75,37 @@ if (-not (Test-Path $OutputDir))
 #                                         CONFIGURE
 #---
 
-Write-Building "GLFW - cmake configure ($BuildDir)"
+$Generator = 'Visual Studio 17 2022'
+if (($env:VisualStudioVersion -like '18.*') -or
+    (Test-Path 'C:\Program Files\Microsoft Visual Studio\18'))
+{
+    $Generator = 'Visual Studio 18 2026'
+}
+
+# A CMake build tree cannot be reused with a different Visual Studio generator.
+$CachePath = Join-Path $BuildDir 'CMakeCache.txt'
+if ($Rebuild -and (Test-Path $BuildDir))
+{
+    Remove-Item $BuildDir -Recurse -Force
+}
+elseif (Test-Path $CachePath)
+{
+    $RecordedGenerator = Get-Content $CachePath -ErrorAction SilentlyContinue |
+                         Where-Object { $_ -like 'CMAKE_GENERATOR:INTERNAL=*' } |
+                         Select-Object -First 1
+    if ($RecordedGenerator -and ($RecordedGenerator -ne "CMAKE_GENERATOR:INTERNAL=$Generator"))
+    {
+        Write-Building 'GLFW - discarding a CMake cache produced by another Visual Studio version'
+        Remove-Item $BuildDir -Recurse -Force
+    }
+}
+
+Write-Building "GLFW - cmake configure ($Generator; $BuildDir)"
 
 $ConfigArgs = @(
     '-S', $GlfwRoot
     '-B', $BuildDir
-    '-G', 'Visual Studio 18 2026'
+    '-G', $Generator
     '-A', 'x64'
     '-DBUILD_SHARED_LIBS=ON'
     '-DGLFW_BUILD_EXAMPLES=OFF'
