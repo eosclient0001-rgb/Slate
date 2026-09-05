@@ -58,6 +58,7 @@ struct SolverConstants
     Method                : u32,        // [-]        0 = explicit MLS-MPM · 1 = position-based MPM
     Iteration             : u32,        // [-]        index within the sub-step (informational)
     Tension               : f32,        // [-]        position-based: largest contraction strain one iteration may propose (α ≥ −Tension)
+    TileCount             : vec3<u32>,  // [-]        8×8×8-site tiles per axis (⌈CellCount / 8⌉) — the sparse-lattice unit
 };
 
 struct Particle
@@ -80,9 +81,10 @@ fn Trace(m: mat3x3<f32>) -> f32
 @group(0) @binding(1) var<storage, read_write> Particles       : array<Particle>;
 @group(0) @binding(2) var<storage, read_write> Lattice         : array<atomic<i32>>;   // 4 quanta per site: mass, momentum xyz
 @group(0) @binding(3) var<storage, read_write> LatticeVelocity : array<vec4<f32>>;     // xyz [m/s], w = site mass [kg]
-@group(0) @binding(4) var<storage, read_write> Tally           : array<atomic<u32>>;   // [0] saturations, [1] speed clamps
+@group(0) @binding(4) var<storage, read_write> Tally           : array<atomic<u32>>;   // [0] saturations, [1] speed clamps, [2] occupied tiles
 @group(0) @binding(5) var<storage, read_write> ProofPartials   : array<vec4<f32>>;     // 2 per workgroup: see ReduceProof
 @group(0) @binding(6) var<storage, read_write> MassPartials    : array<f32>;           // per workgroup: Σ site mass [kg]
+@group(0) @binding(7) var<storage, read_write> TileMask        : array<atomic<u32>>;   // 1 = some stencil touches this 8³ tile
 
 //------------------------------------------------------------------------------------------------------------------------
 //                                                  STENCIL HELPERS
@@ -133,6 +135,15 @@ fn Quantise(amount: f32, inverseQuantum: f32) -> i32
 fn ClearLattice(@builtin(global_invocation_id) id: vec3<u32>)
 {
     let siteCount = Constants.CellCount.x * Constants.CellCount.y * Constants.CellCount.z;
+    let tileCount = Constants.TileCount.x * Constants.TileCount.y * Constants.TileCount.z;
+    if (id.x < tileCount)
+    {
+        atomicStore(&TileMask[id.x], 0u);   // tile occupancy is per tick; MarkTiles rebuilds it after the last transfer
+    }
+    if (id.x == 0u)
+    {
+        atomicStore(&Tally[2], 0u);
+    }
     if (id.x >= siteCount)
     {
         return;
@@ -141,6 +152,40 @@ fn ClearLattice(@builtin(global_invocation_id) id: vec3<u32>)
     atomicStore(&Lattice[id.x * 4u + 1u], 0);
     atomicStore(&Lattice[id.x * 4u + 2u], 0);
     atomicStore(&Lattice[id.x * 4u + 3u], 0);
+}
+
+//------------------------------------------------------------------------------------------------------------------------
+//                                    TILE OCCUPANCY — THE PARTICLE ORACLE OF A SPARSE LATTICE
+//------------------------------------------------------------------------------------------------------------------------
+// Cirrus (SIGGRAPH 2025) refines its GPU octree where the particles are; Adaptive PF-FLIP (SIGGRAPH 2025) allocates
+// sparse blocks the same way. This pass is that oracle on our lattice: every 8×8×8 tile touched by a particle stencil is
+// marked, and Tally[2] counts the marks — the number of tiles a sparse lattice would have to allocate this tick, i.e.
+// the fraction of ClearLattice / AdvanceLattice / memory that sparsity saves. Once per tick, after the last transfer.
+
+@compute @workgroup_size(64)
+fn MarkTiles(@builtin(global_invocation_id) id: vec3<u32>)
+{
+    if (id.x >= Constants.ParticleCount)
+    {
+        return;
+    }
+    let stencil = BuildStencil(Particles[id.x].Position);
+    let low     = vec3<u32>(stencil.Anchor) / 8u;         // anchor ≥ 1 by the hard clamp, so the cast is safe
+    let high    = vec3<u32>(stencil.Anchor + 2) / 8u;     // a 3-wide stencil straddles at most two tiles per axis
+    for (var k = low.z; k <= high.z; k++)
+    {
+        for (var j = low.y; j <= high.y; j++)
+        {
+            for (var i = low.x; i <= high.x; i++)
+            {
+                let slot = (k * Constants.TileCount.y + j) * Constants.TileCount.x + i;
+                if (atomicMax(&TileMask[slot], 1u) == 0u)
+                {
+                    atomicAdd(&Tally[2], 1u);
+                }
+            }
+        }
+    }
 }
 
 //------------------------------------------------------------------------------------------------------------------------

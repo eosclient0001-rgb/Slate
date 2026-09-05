@@ -20,16 +20,18 @@
 //        Tally            4 × u32                  [0] saturated fixed-point contributions, [1] speed clamps
 //        ProofPartials    ⌈N/256⌉ × 2 vec4<f32>    per-workgroup (count, Σ|v|², Σz, max|v|), (ΣJ, min J, max J, Σ(J−1)²)
 //        MassPartials     ⌈sites/256⌉ × f32        per-workgroup Σ site mass
+//        TileMask         tiles × u32               8³-tile occupancy (the particle oracle of the coming sparse lattice)
 
 import { ParticleStride } from "./DamBreakStructure.js";
 
 const ParticleWorkgroup = 64;
 const SiteWorkgroup     = 256;
-const SliceBytes        = 256;                // one SolverConstants (116 B) per iteration; 256 satisfies every minUniformBufferOffsetAlignment
+const SliceBytes        = 256;                // one SolverConstants (144 B) per iteration; 256 satisfies every minUniformBufferOffsetAlignment
 const MaxIterations     = 8;
 const ExplicitKernels   = ["ClearLattice", "ScatterMass", "ScatterStress", "AdvanceLattice", "GatherParticles"];
 const PositionKernels   = ["ProjectVolume", "ClearLattice", "ScatterMass", "AdvanceLattice", "GatherParticles"];
-const KernelNames       = ["ClearLattice", "ScatterMass", "ScatterStress", "ProjectVolume", "AdvanceLattice", "GatherParticles", "ReduceProof"];
+const KernelNames       = ["ClearLattice", "ScatterMass", "ScatterStress", "ProjectVolume", "AdvanceLattice", "GatherParticles", "MarkTiles", "ReduceProof"];
+const TileSide          = 8;                  // sites per tile axis — Cirrus's 8³ GPU tile, the unit of the coming sparse lattice
 const SiteKernels       = new Set(["ClearLattice", "AdvanceLattice"]);
 
 export const Methods = Object.freeze({ Explicit: "explicit", PositionBased: "positionbased" });
@@ -82,6 +84,7 @@ export class LiquidSolver
                 { binding: 4, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
                 { binding: 5, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
                 { binding: 6, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
+                { binding: 7, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
             ],
         });
         const pipelineLayout = device.createPipelineLayout({ bindGroupLayouts: [layout] });
@@ -96,8 +99,10 @@ export class LiquidSolver
 
         const N     = scene.ParticleCount;
         const sites = scene.NodeCount;
+        this.TileCount      = scene.CellCount.map(n => Math.ceil(n / TileSide));
+        this.Tiles          = this.TileCount[0] * this.TileCount[1] * this.TileCount[2];
         this.ParticleGroups = Math.ceil(N / ParticleWorkgroup);
-        this.SiteGroups     = Math.ceil(sites / SiteWorkgroup);
+        this.SiteGroups     = Math.ceil(Math.max(sites, this.Tiles) / SiteWorkgroup);
         this.ProofGroups    = Math.ceil(N / SiteWorkgroup);
 
         const Make = (label, size, usage) => device.createBuffer({ label, size, usage });
@@ -109,6 +114,7 @@ export class LiquidSolver
         this.ProofPartials   = Make("ProofPartials",   this.ProofGroups * 32,      S.STORAGE | S.COPY_SRC);
         this.MassPartials    = Make("MassPartials",    this.SiteGroups * 4,        S.STORAGE | S.COPY_SRC);
         this.Constants       = Make("SolverConstants", SliceBytes * MaxIterations, S.UNIFORM | S.COPY_DST);
+        this.TileMask        = Make("TileMask",        this.Tiles * 4,             S.STORAGE);
 
         // One staging block: [ProofPartials | MassPartials | Tally], every section 4-byte aligned by construction.
         this.ProofOffset   = 0;
@@ -133,6 +139,7 @@ export class LiquidSolver
                 { binding: 4, resource: { buffer: this.Tally } },
                 { binding: 5, resource: { buffer: this.ProofPartials } },
                 { binding: 6, resource: { buffer: this.MassPartials } },
+                { binding: 7, resource: { buffer: this.TileMask } },
             ],
         });
 
@@ -222,6 +229,7 @@ export class LiquidSolver
             u[26] = this.PositionBased ? 1 : 0;
             u[27] = i;
             f[28] = t.Tension;
+            u[32] = this.TileCount[0];  u[33] = this.TileCount[1];  u[34] = this.TileCount[2];
         }
         this.Device.queue.writeBuffer(this.Constants, 0, block);
         this.TimeStep = timeStep;
@@ -270,6 +278,12 @@ export class LiquidSolver
             this.SubSteps++;
             this.Time += subStepSeconds;
         }
+        // Tile occupancy once per tick (after the last transfer's ClearLattice has reset the mask and Tally[2]).
+        const tiles = encoder.beginComputePass({ label: "MarkTiles", timestampWrites: metrics?.Slot("Tiles") });
+        tiles.setPipeline(this.Kernels.MarkTiles);
+        tiles.setBindGroup(0, this.Group, [0]);
+        tiles.dispatchWorkgroups(this.ParticleGroups);
+        tiles.end();
         this.Tick++;
     }
 
@@ -342,10 +356,11 @@ export class LiquidSolver
             MinVolume: volumeMin, MaxVolume: volumeMax,
             VolumeSpread: count > 0 ? Math.sqrt(volumeSquare / count) : NaN,  // [-]   RMS of J − 1
             Saturations: tally[0], SpeedClamps: tally[1],
+            OccupiedTiles: tally[2], Tiles: this.Tiles,                       // [-]   8³ tiles a sparse lattice would allocate this tick
         };
         this.Staging.unmap();
         this.StagingBusy = false;
-        this.Device.queue.writeBuffer(this.Tally, 0, new Uint32Array(4));
+        this.Device.queue.writeBuffer(this.Tally, 0, new Uint32Array(2));   // [0],[1] accumulate between proofs; [2] is per tick
         return record;
     }
 
@@ -380,7 +395,7 @@ export class LiquidSolver
 
     Destroy()
     {
-        for (const b of [this.Records, this.Lattice, this.LatticeVelocity, this.Tally, this.ProofPartials, this.MassPartials, this.Constants, this.Staging, this.TraceStaging])
+        for (const b of [this.Records, this.Lattice, this.LatticeVelocity, this.Tally, this.ProofPartials, this.MassPartials, this.Constants, this.TileMask, this.Staging, this.TraceStaging])
         {
             b?.destroy();
         }

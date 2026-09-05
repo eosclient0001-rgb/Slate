@@ -310,6 +310,8 @@ function Judge(record, final)
         const drift = Math.abs(record.MeanVolume - 1.0);
         Check("volume", drift < 0.05, `mean J ${record.MeanVolume.toFixed(4)} (RMS spread ${record.VolumeSpread.toFixed(3)}, min ${record.MinVolume.toFixed(2)}, max ${record.MaxVolume.toFixed(2)})`);
     }
+    // Sparsity measure (not a proof): tiles a sparse lattice would allocate — the saving the adaptive steps A1/A2 buy.
+    Check("tiles", record.OccupiedTiles >= 1 && record.OccupiedTiles <= record.Tiles, `${record.OccupiedTiles} / ${record.Tiles} 8³ tiles touched (${(100 * record.OccupiedTiles / record.Tiles).toFixed(0)} % of the lattice)`);
     if (final && Host.Settings.Proof)
     {
         // The settle proof needs the sloshing to have died down: ≥ 6 s at 32–64 cells (energy halves every ~2 s).
@@ -321,7 +323,8 @@ function Judge(record, final)
     Host.Proofs.push({ ...record, Rows: rows });
     const E = Host.Elements;
     const summary = `RMS speed ${record.MeanSpeed.toFixed(3)} m/s · mean height ${((record.MeanHeight - s.FloorHeight) * 100).toFixed(1)} cm` +
-                    (Host.Solver.PositionBased ? ` · mean J ${record.MeanVolume.toFixed(4)}` : "");
+                    (Host.Solver.PositionBased ? ` · mean J ${record.MeanVolume.toFixed(4)}` : "") +
+                    ` · tiles ${record.OccupiedTiles}/${record.Tiles}`;
     E.proofs.textContent = `t = ${record.Time.toFixed(2)} s · tick ${record.Tick}\n` + rows.join("\n") + "\n" + summary;
     console.log(`[Project-Fluid] proof t=${record.Time.toFixed(2)} ${rows.every(r => r.startsWith("✅") || r.startsWith("⚠️")) ? "ok" : "FAIL"} · ${summary}`);   // the time series for headless runs
 }

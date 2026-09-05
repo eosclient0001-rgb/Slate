@@ -38,8 +38,9 @@ Legend 🥇🥈🥉 ranking for our goal · ✅ fits · ⚠️ with caveats · �
 
 ## 2. The Two Minute Papers "adaptive fluid simulation" episode — two candidates
 
-The channel index isn't searchable from here, so both 2025 adaptive papers are covered; the user should confirm which
-one they saw:
+The channel index isn't searchable from here, so both 2025 adaptive papers are covered. **Resolved 2026-09-06: the user
+saw both and wants both implemented, then combined — see `FluidPhaseF2-AdaptivePlan.md`.** The comparison stays as the
+reference:
 
 | | **A — Cirrus (SIGGRAPH 2025)** [10] | **B — Adaptive Phase-Field-FLIP (SIGGRAPH 2025)** [11][12] |
 |---|---|---|
@@ -234,10 +235,10 @@ solvers** and the largest resolution that holds 60 Hz — those decide T1's part
 |---|---|---|---|
 | ~~**F1.3 PB-MPM**~~ | ✅ done (§4.2b): k Jacobi iterations per sub-step, volume proof, both solvers selectable | on the GTX: ms/tick PB-MPM 3×2 vs explicit 6×1 at 64/96 cells | [3][4] |
 | **F1.4 Collider** | A kinematic box (Jolt-shaped SDF) dragged through the water, one-way; then impulse sums read back for two-way Jolt coupling | splash correctness, readback latency | Project-Physics `RigidBodySolver` |
-| **F1.5 Adaptive LOD** | Camera-distance particle merging/splitting on the MPM solver (the cheap form of [10][11][15]) | speed-up at equal look | [15] |
+| **F2-A Adaptive (both papers)** | Decision 2026-09-06: Cirrus [10] *and* Adaptive PF-FLIP [11] both go in, each as its own scene, then combined. A0 tile oracle ✅ (`MarkTiles`, `tiles n/N` in every proof) → A1 sparse 8³-tile lattice → A3 Leapfrog-Flow-Map air lane [9] on the same tiles → A2 PF-FLIP-style adaptive particles → A4 combined plunge scene. Full plan, costs and proofs: `FluidPhaseF2-AdaptivePlan.md` | tiles n/N; trace hash identical dense vs sparse; vortex-ring leapfrog test; ms/tick at 96/128 | [9][10][11][12] |
 | **F1.6 Subgroups** | `enable subgroups` for the proof/mass reductions and a sorted P2G (fewer atomics) | P2G ms | [23] |
 | **F2 Rendering** | Anisotropic sprites [19], narrow-band filtering (CGF 2022, in F0), foam from thickness/velocity | ms at scale 1.0 | [19][20] |
-| **F3 Smoke/fire** | Leapfrog Flow Maps port: 96³ grid, matrix-free AMGPCG in WGSL, half-res ray-march | ms/step vs the paper's 5.6 ms @ 128³ on a 4090 | [9] |
+| ~~**F3 Smoke/fire**~~ | folded into F2-A step A3 (the air lane *is* the Leapfrog Flow Maps port, on the sparse tiles) | ms/step vs the paper's 5.6 ms @ 128³ on a 4090 | [9] |
 | **F4 Cloth** | VBD in WGSL on a 64×64 sheet, then AVBD constraints | ms/step, stability at 60 Hz | [5][13] |
 | **Exit to `Engine/`** | When T1 holds ≥ 100 k particles at 60 Hz on the GTX with stable kernels: port WGSL → Slang for the Vulkan path (kernels are plain compute — no WebGPU-only features are used except timestamps) | — | F0 §4 |
 

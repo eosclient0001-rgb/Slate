@@ -127,7 +127,8 @@ bash Projects/Project-Fluid/Build/ToolchainSequence.sh --port 8765              
   `solver=positionbased|explicit` (default PB-MPM, EA SEED 2024; explicit = MLS-MPM + Tait EOS), `iterations=1…8`, `stiffness=κ`, `substeps=auto|N`
 - Exit status in `window.ProjectFluidExit` and `#status`: 0 proofs passed, 2 a proof failed, 1 refusal (no WebGPU)
 - Survey + plan: `References/FluidPhaseF1-RecentSurveyAndWebGpuPlan.md` (2023–2026 sources); background: `FluidPhaseF0-SurveyAndPlan.md`;
-  field-by-field comparison with Unreal Niagara Fluids + material road map (water → honey → mud → snow): `FluidPhaseF1-UnrealComparison.md`
+  field-by-field comparison with Unreal Niagara Fluids + material road map (water → honey → mud → snow): `FluidPhaseF1-UnrealComparison.md`;
+  adaptive phase (Cirrus + Adaptive PF-FLIP, each as its own effect, then combined; A0 tile oracle done, A1–A5 planned): `FluidPhaseF2-AdaptivePlan.md`
 
 ### Linux CMake (IDE integration / non-Windows only)
 ```bash

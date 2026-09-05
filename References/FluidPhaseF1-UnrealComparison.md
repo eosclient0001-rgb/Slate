@@ -84,9 +84,11 @@ when a second material is wanted in a scene.
 
 ## 4. Was the "adaptive fluid" research used?
 
-Not yet — deliberately. The two Two-Minute-Papers candidates, Cirrus (adaptive hybrid particle-grid flow maps) and
-Adaptive Phase-Field-FLIP (SIGGRAPH 2025), are *adaptivity* papers: they spend resolution where the camera or the
-interface needs it. That only pays once the base solver is fixed and measured. Where they enter the ladder:
+Not in `f152dad` — deliberately: the two Two-Minute-Papers candidates, Cirrus (adaptive hybrid particle-grid flow
+maps) and Adaptive Phase-Field-FLIP (SIGGRAPH 2025), are *adaptivity* papers that only pay once the base solver is fixed
+and measured. **Superseded 2026-09-06:** the user wants both, each as its own effect, then combined; the first step (the
+tile-occupancy oracle both papers rely on) is in, and the plan with the papers' real costs is `FluidPhaseF2-AdaptivePlan.md`.
+The table below is the pre-decision placement, kept for the record:
 
 | Step | Paper | Form it takes here |
 |---|---|---|
@@ -95,9 +97,8 @@ interface needs it. That only pays once the base solver is fixed and measured. W
 | later | Adaptive PF-FLIP | only if we ever need two-phase (air + water) simulation at very large scale — not a game-engine priority |
 
 What *was* used from the 2023–2026 survey: PB-MPM (EA SEED 2024) as the solver, the narrow-range filter for the surface,
-WebGPU-first prototyping (Splash / WebGPU-Ocean precedent), and fixed-point atomics for deterministic P2G. The user's
-call on which TMP episode it was (A Cirrus / B Adaptive PF-FLIP) is still open and decides which of the two gets
-the F1.5/F3 slot first.
+WebGPU-first prototyping (Splash / WebGPU-Ocean precedent), and fixed-point atomics for deterministic P2G. The TMP
+question is closed: both papers, both effects, then the combination (`FluidPhaseF2-AdaptivePlan.md`).
 
 ---
 
