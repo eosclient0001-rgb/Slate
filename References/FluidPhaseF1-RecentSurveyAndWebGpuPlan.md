@@ -213,6 +213,10 @@ Reading:
 Frames: `References/Figures/ProjectFluid_PbMpm_1s_32cells_SwiftShader.png` (1 s, the column hitting the far wall as a
 sheet rather than as droplets) and `…_PbMpm_8s_32cells_SwiftShader.png` (settled, 8 s, level surface).
 
+Viscous check (`?shear=1.0&iterations=3&seconds=1.5`): the same dam-break oozes instead of splashing — RMS 0.83 m/s at
+0.5 s, **0.04 m/s at 1.5 s** (water: 1.80 → 1.03 m/s), mean J 0.989. Frames `…_PbMpm_Viscous_1p5s_32cells_SwiftShader.png`
+(surface) and `…_Particles_SwiftShader.png`. The material comparison against Unreal is in `FluidPhaseF1-UnrealComparison.md`.
+
 ### 4.3 What the user runs on the GTX (Windows, Chrome/Edge 113+)
 
 ```
