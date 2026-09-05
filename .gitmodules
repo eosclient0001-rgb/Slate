@@ -1,0 +1,5 @@
+[submodule "ExternalPackages/jolt"]
+	path = ExternalPackages/jolt
+	url = https://github.com/jrouwe/JoltPhysics.git
+	ignore = untracked
+	shallow = true

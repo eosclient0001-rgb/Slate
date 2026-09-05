@@ -1,0 +1,33 @@
+# Build artifacts and binaries
+*.o
+*.obj
+*.exe
+*.a
+*.lib
+*.ppm
+bin/
+build/
+Projects/**/bin/
+Projects/**/build/
+Scratchpad/GenerateDialogueProofs
+Scratchpad/GenerateFontSectionProofs
+Scratchpad/GenerateThemeSectionProofs
+Scratchpad/GenerateCarouselProofs
+Scratchpad/GenerateControlPanelProof
+Scratchpad/VectorGlyphTest
+.DS_Store
+
+# Per-user Control Centre preferences (written by ConfigurationRegistry at runtime)
+Projects/*/Content/Slate.config.toml
+
+# Fetched test levels (Projects/Project-Zero/Build/FetchSponza.ps1) - never committed
+Projects/*/Content/Scenes/Sponza/
+Projects/*/Content/Scenes/ShaderBall.gltf
+
+# Jolt Physics — built from the submodule by Scripts/BuildJolt.{sh,ps1}; archives and objects are never committed
+ExternalPackages/jolt/lib/
+ExternalPackages/jolt/_build/
+Projects/**/Build/Output/
+
+# Per-run telemetry (Projects/*/Source/GameExecution.cpp writes Diagnostics/<Project>_TelemetryReport.md)
+Diagnostics/*_TelemetryReport.md
