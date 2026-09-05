@@ -80,7 +80,7 @@ powershell -File Projects\Project-Zero\Build\ToolchainSequence.ps1 -Rebuild -Run
 - Requires: Visual Studio 2022 (MSVC), Vulkan SDK (sets `VULKAN_SDK` env var or falls back to `C:\VulkanSDK\<latest>`), PowerShell 5.1 or later
 - GLFW is built automatically via `Scripts\BuildGLFW.ps1` when `ExternalPackages\glfw\lib-vc2022\glfw3dll.lib` is absent (cmake VS17 2022 → DLL + import lib)
 - ThorVG is built automatically via `Scripts\BuildThorVG.ps1` when `ExternalPackages\thorvg\lib\thorvg.lib` is absent (direct `cl.exe` → static lib)
-- Jolt is built automatically via `Scripts\BuildJolt.ps1` when `ExternalPackages\jolt\lib\<Configuration>\Jolt.lib` is absent (direct `cl.exe` → static lib, 138 TUs, rigid-body subset). ⚠️ Jolt derives `JPH_USE_*`/`JPH_DEBUG` from compiler flags and `RegisterTypes()` aborts on a client mismatch — every TU that includes `<Jolt/Jolt.h>` must use the same `/arch:AVX`, `/MD`, NDEBUG choice as the library
+- Jolt is built automatically via `Scripts\BuildJolt.ps1` when `ExternalPackages\jolt\lib\<Configuration>\Jolt.lib` is absent (direct `cl.exe` → static lib, 138 TUs, rigid-body subset). ⚠️ Jolt derives `JPH_USE_*`/`JPH_DEBUG` from compiler flags and `RegisterTypes()` aborts on a client mismatch — every TU that includes `<Jolt/Jolt.h>` must use the same `-Isa` (SSE2 default — Sandy Bridge i3 has no AVX), `/MD`, NDEBUG choice as the library; `ToolchainSequence.ps1 -Isa AVX` forwards it to `BuildJolt.ps1`
 - Shaders: `.slang` → SPIR-V via `slangc.exe` (ships with Vulkan SDK)
 - Compatible with Windows PowerShell 5.1 and PowerShell 7+ (both `powershell.exe` and `pwsh.exe` work)
 - `Construct.ps1` is a banned script name — use `ToolchainSequence.ps1`

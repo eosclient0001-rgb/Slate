@@ -13,7 +13,11 @@ param(
     [switch]   $Rebuild,
     [switch]   $Run,
     [string[]] $RunArguments = @(),
-    [int]      $Parallel = 0
+    [int]      $Parallel = 0,
+    # Instruction set of the OLDEST machine this binary must run on. MUST match every other Frontier build
+    #    script: Jolt derives JPH_USE_AVX/SSE4_2/SSE4_1 from __AVX__ and RegisterTypes() aborts on a mismatch.
+    #    ⚠️ Sandy Bridge Core i3 (e.g. i3-2120) has NO AVX -> 0xc000001d STATUS_ILLEGAL_INSTRUCTION at launch.
+    [ValidateSet('SSE2', 'AVX', 'AVX2')] [string] $Isa = 'SSE2'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -119,8 +123,9 @@ function Get-CompilationFlags([string] $Selection)
         '/DNOMINMAX'
         '/D_CRT_SECURE_NO_WARNINGS'
         '/DFRONTIER_DEVELOPMENT'
-        '/arch:AVX'     # must equal BuildJolt.ps1: Jolt's RegisterTypes() aborts on an ISA/define mismatch
     )
+    # Must equal BuildJolt.ps1: Jolt's RegisterTypes() aborts on an ISA/define mismatch.
+    if ($Isa -ne 'SSE2') { $Common += "/arch:$Isa" }
 
     if ($Selection -eq 'Debug')
     {
@@ -317,7 +322,8 @@ $JoltLib = Join-Path $PackageRoot "jolt\lib\$Configuration\Jolt.lib"
 if ($Rebuild -or (-not (Test-Path $JoltLib)))
 {
     Write-Building "Jolt.lib ($Configuration) absent or rebuild requested - invoking BuildJolt.ps1"
-    $JoltArguments = @('-Configuration', $Configuration)
+    # -Isa MUST be forwarded: an AVX Jolt.lib against an SSE2 client (or the reverse) aborts in RegisterTypes().
+    $JoltArguments = @('-Configuration', $Configuration, '-Isa', $Isa)
     if ($Rebuild) { $JoltArguments += '-Rebuild' }
     $ExitCode = Invoke-DependencyScript (Join-Path $ScriptRoot 'BuildJolt.ps1') $JoltArguments
     if ($ExitCode -ne 0) { throw 'BuildJolt.ps1 failed' }

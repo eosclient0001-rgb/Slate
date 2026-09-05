@@ -13,7 +13,11 @@
 param(
     [ValidateSet('Debug', 'Release')] [string] $Configuration = 'Release',
     [switch] $Rebuild,
-    [int]    $Parallel = 0
+    [int]    $Parallel = 0,
+    # Instruction set of the OLDEST machine this binary must run on. MUST match every other Frontier build
+    #    script: Jolt derives JPH_USE_AVX/SSE4_2/SSE4_1 from __AVX__ and RegisterTypes() aborts on a mismatch.
+    #    ⚠️ Sandy Bridge Core i3 (e.g. i3-2120) has NO AVX -> 0xc000001d STATUS_ILLEGAL_INSTRUCTION at launch.
+    [ValidateSet('SSE2', 'AVX', 'AVX2')] [string] $Isa = 'SSE2'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -114,13 +118,15 @@ $Flags = @(
     '/fp:precise'
     '/W3'
     '/utf-8'
-    '/arch:AVX'          # == Project-Zero; Core.h derives JPH_USE_AVX / SSE4_2 / SSE4_1 from __AVX__
     '/EHsc'              # == Project-Zero (Jolt itself never throws, but the flag must match the client)
     '/MD'                # == Project-Zero in BOTH configurations (its Debug is /MD + /Od, never /MDd) - LNK2038 otherwise
     '/DWIN32_LEAN_AND_MEAN'
     '/DNOMINMAX'
     "/I$JoltRoot"
 )
+# Core.h derives JPH_USE_AVX / SSE4_2 / SSE4_1 from __AVX__, so the ISA is part of Jolt's version-features ID.
+#    Baseline SSE2 emits no /arch (the x64 default). Must equal the client's -Isa or RegisterTypes() aborts.
+if ($Isa -ne 'SSE2') { $Flags += "/arch:$Isa" }
 # RTTI is left at the MSVC default (/GR) because Project-Zero does not pass /GR-; Jolt uses no RTTI itself, so either
 # setting works as long as the library and the client agree.
 

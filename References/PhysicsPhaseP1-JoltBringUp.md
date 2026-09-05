@@ -58,8 +58,10 @@ Physics.Retire();                    // destroys bodies, world, job threads; unr
    if (-not (Test-Path $JoltLib)) { Invoke-DependencyScript (Join-Path $ScriptRoot 'BuildJolt.ps1') @('-Configuration', $Configuration) }
    ```
    append `'Engine\PhysicalDynamics\RigidBodySolver.cpp'` to `$EngineRelative`, and `$LinkArgs.Add($JoltLib)`.
-   The flag sets already agree: Project-Zero compiles `/MD /std:c++20 /arch:AVX /EHsc` with `/DNDEBUG` in Release and
+   The flag sets already agree: Project-Zero compiles `/MD /std:c++20 /EHsc` with `/DNDEBUG` in Release and
    **`/MD` + `/Od` without NDEBUG** in Debug — `BuildJolt.ps1` does exactly the same (`/MD` in both configurations, never `/MDd`).
+   ISA is a parameter on every script (`-Isa SSE2|AVX|AVX2`, default **SSE2** — upstream `f78f027`: a Sandy Bridge i3 has no AVX and
+   `/arch:AVX` died with `0xc000001d` at launch); `ToolchainSequence.ps1` forwards `-Isa` to `BuildJolt.ps1` so the pair cannot drift.
    ⚠️ If either side ever changes `/arch`, NDEBUG, or the runtime, `JPH::RegisterTypes()` traces `Version mismatch …` and aborts —
    that is the intended fail-fast, not a bug.
 4. **CMakeLists.txt** (Project-Zero) — paste the `Jolt` library block from this branch's `CMakeLists.txt`, add
