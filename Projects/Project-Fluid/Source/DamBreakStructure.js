@@ -8,7 +8,8 @@
 //    cells along x; everything else follows from it (Δx = 2 m / Resolution, eight particles per cell at Δx/2 spacing, so
 //    particle count grows with Resolution³ — 32 → ~7 k, 64 → ~74 k, 96 → ~280 k, 128 → ~700 k).
 //
-//    Records match the WGSL Particle struct: Position vec3 (16 B), Velocity vec3 (16 B), Affine mat3x3 (48 B) → 80 bytes.
+//    Records match the WGSL Particle struct: Position vec3 + Volume (16 B), Velocity vec3 + reserve (16 B), Affine mat3x3
+//    (48 B) → 80 bytes.
 //    A deterministic jitter of ±5 % of the spacing breaks the lattice symmetry the same way on every machine.
 //
 //    Units: metres, kilograms; right-handed, +Z up. Node (i, j, k) sits at (i, j, k) · Δx; the fluid may occupy nodes
@@ -68,7 +69,8 @@ export function DescribeDamBreak(options = {})
                 Records[lane + 0] = (WallMargin + 0.25) * CellSize + i * Spacing + (Next() - 0.5) * 2.0 * Jitter;
                 Records[lane + 1] = (WallMargin + 0.25) * CellSize + j * Spacing + (Next() - 0.5) * 2.0 * Jitter;
                 Records[lane + 2] = (WallMargin + 0.25) * CellSize + k * Spacing + (Next() - 0.5) * 2.0 * Jitter;
-                // Velocity (4..6) and Affine (8..19) start at zero; padding lanes stay zero.
+                Records[lane + 3] = 1.0;   // Volume J = det F: rest volume
+                // Velocity (4..6) and Affine (8..19) start at zero; lane 7 is the reserve lane.
                 cursor++;
             }
         }

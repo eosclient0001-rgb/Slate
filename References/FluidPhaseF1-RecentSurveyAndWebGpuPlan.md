@@ -82,11 +82,11 @@ Projects/Project-Fluid/
     ├── index.html                        ← page shell: canvas + controls (no logic)
     ├── GameExecution.js                  ← main loop: fixed 60 Hz tick accumulator → LiquidSolver.Advance → Present → proofs
     ├── DamBreakStructure.js              ← the scene: 2 m × 1 m × 1.25 m box, water column, particle records (80 B each)
-    ├── LiquidSolver.js                   ← MLS-MPM on WebGPU: storage, 6 kernels, tuning, proof + trace readback
+    ├── LiquidSolver.js                   ← MPM on WebGPU: storage, 7 kernels, two methods (PB-MPM · explicit), proof + trace readback
     ├── SurfaceProjection.js              ← screen-space renderer: background, sprites, thickness, narrow-range smooth, shade
     ├── TimingMetrics.js                  ← timestamp-query telemetry (ms per kernel per tick) + CSV
     └── Shaders/
-        ├── ParticleSolver.wgsl           ← ClearLattice · ScatterMass · ScatterStress · AdvanceLattice · GatherParticles · ReduceProof
+        ├── ParticleSolver.wgsl           ← ClearLattice · ScatterMass · ScatterStress · ProjectVolume · AdvanceLattice · GatherParticles · ReduceProof
         └── SurfaceProjection.wgsl        ← BackgroundRaster · SpriteRaster · ThicknessRaster · SmoothRaster · ShadeRaster
 ```
 
@@ -124,7 +124,7 @@ irrelevant timings (the GPU numbers below are a CPU emulating a GPU and say noth
 | WGSL compile (Tint, Chromium 149) | `ParticleSolver.wgsl` 0 messages · `SurfaceProjection.wgsl` 0 messages |
 | Pipelines, bind groups, all six kernels, all five rasters | no validation errors (error scopes around every stage) |
 | `?resolution=32&seconds=8&proof=1&fixed=1` (5 544 particles, 32×16×20 lattice, 6 sub-steps/tick) | **PASS, exit 0** — containment 5544/5544 · mass 169.189 kg vs 169.189 kg (0.000 %) · finite: 0 saturations, max \|v\| 0.76 m/s · settle: mean height 6.4 cm vs 7.3 cm expected (12.8 %), RMS speed 0.121 m/s |
-| Determinism | trace hash `e8a16769` on two consecutive 8 s runs with the same URL |
+| Determinism | trace hash `e8a16769` on two consecutive 8 s runs with the same URL (F1.2 build; after the F1.3 wall fix the explicit hash is `07afb8ce`, PB-MPM `82af79ca`) |
 | `?resolution=48&seconds=1.5` (26 752 particles, 9 sub-steps/tick) | containment / mass / finite pass; settle correctly reported ❌ at 1.5 s (the water is still sloshing: RMS 1.13 m/s) — the settle proof is only meaningful at ≥ 6 s |
 | Offscreen capture | `?offscreen=1` shades into a texture instead of the swapchain (SwiftShader cannot present) and exposes `window.ProjectFluidCapture()` — the screenshots in the reply come from that path |
 | Timings | meaningless here (100 ms/tick at 48 cells on a CPU emulating a GPU); the point of the run is correctness |
@@ -144,6 +144,75 @@ Particle counts per resolution (box fixed at 2 × 1 × 1.25 m, 8 particles/cell)
 80 → 149 k · 96 → 269 k · 128 → 688 k · 160 → 1.38 M (records 105 MB + lattice 39 MB, inside the default 128 MiB
 `maxStorageBufferBindingSize` per buffer).
 
+### 4.2b F1.3 — position-based MPM (EA SEED 2024) is in, and is now the default solver
+
+The explicit solver's cost is set by the speed of sound, not by the water: at κ = 10 kPa the acoustic Courant bound
+needs 6 sub-steps per tick at 32 cells, 9 at 48, ≈ 12 at 64 — and stiffer water (less than 7 % compression under the
+column) would need more still. PB-MPM [3][4] removes the sound speed: each sub-step runs *k* Jacobi iterations of
+"project every particle's displacement gradient toward volume preservation → average the proposals on the lattice
+(P2G ÷ mass → G2P)", and the sub-step is bounded only by advection (v_ref·Δt/Δx). Implemented here in 3-D on the same
+storage, following EA's liquid branch (`particleUpdatePBMPM` / `gridToParticle` / `particleIntegrate` of the
+`siggraph2024` branch of `electronicarts/pbmpm`, BSD-3):
+
+* `ProjectVolume` (new kernel): with D = C·Δτ, remove ShearRelaxation·sym(D) (viscosity), then D += ω·α·I with
+  α = (1/J − 1 − tr D)/3 so that (1 + tr(D + αI))·J → 1; α is floored at −Tension (0.25) as a spray safety net only.
+* `ScatterMass` → `AdvanceLattice` → `GatherParticles` are unchanged kernels; the recipe drops `ScatterStress`. Gravity
+  enters on iteration 0 only; the last iteration carries `Integrate = 1` and advects, updates J *= 1 + tr D (first-order
+  det(I + D)), blends J toward the lattice-measured volume ratio ρ₀/ρ_lattice when compressed (EA's grid-volume rule,
+  blend 0.1, with the mirrored-wall density so the floor does not read as tension) and applies the same walls / look-ahead
+  push / hard clamp as before.
+* Particle record: the two padding lanes became `Volume` (J) and a reserve; still 80 B, so the renderer only re-declared
+  the struct. Constants: one 256-byte slice per iteration through a dynamic uniform offset (one bind group serves every
+  dispatch); `Iterations ≤ 8`.
+* New proof **volume**: mean J within 5 % of 1 at every proof (position-based only — the explicit method never touches J).
+  `ReduceProof` now also returns min/max J and the RMS spread.
+* Both methods stay selectable: `?solver=positionbased` (default, `&iterations=k`, `&relaxation=ω`, `&shear=s`) and
+  `?solver=explicit&stiffness=κ`. The Courant planner knows which bound applies (`Describe()` reports it).
+
+Two host/wall fixes fell out of the PB-MPM proof runs and apply to both solvers:
+
+* **Wall plane site** — the separating slip condition was applied to sites strictly *inside* the margin, not to the
+  plane site itself. A particle resting on the plane draws 87.5 % of its velocity from the plane site and the one
+  behind it, so the wall was soft by half a cell; the stiffer PB-MPM water exposed it as two containment misses on impact
+  (5542/5544 at 0.5 s with ω = 1.5). Including the plane site (`<=` / `>=`) closes it for both methods. The explicit trace
+  hash therefore moved from `e8a16769` to `07afb8ce` — the physics changed, deliberately.
+* **Proof series** — `fixed=1` now waits for `queue.onSubmittedWorkDone()` before encoding the next tick, so the 30-tick
+  proof cadence holds on any GPU (before, an emulated GPU fell hundreds of ticks behind and every proof between the
+  first and the last was skipped as "readback still in flight"). Each proof is also logged to the console as one line,
+  which is the time series below.
+
+Sandbox results at 32 cells (SwiftShader, correctness only; `?resolution=32&seconds=8&proof=1&fixed=1`, 5 544 particles):
+
+| Solver | Sub-steps × iterations = lattice transfers / tick | 8 s proofs | Settle (mean height vs 7.3 cm · RMS speed) | Trace |
+|---|---|---|---|---|
+| explicit MLS-MPM κ = 10 kPa (baseline) | 6 × 1 = **6** | containment · mass · finite ✅; settle ❌ at 8 s (RMS 0.269 m/s > 0.2 — acoustic ringing, see the series), ✅ with `seconds=14` (6.9 cm, 0.126 m/s) | 7.0 cm (4.5 %) · 0.269 m/s at 8 s | `07afb8ce` (8 s) · `3164d64e` (14 s) |
+| **PB-MPM, 2 iterations (default)** | 3 × 2 = **6** | all ✅ incl. **volume** (mean J 0.983, spread 0.026, min 0.84, max 1.14) | **7.1 cm (2.5 %) · 0.119 m/s** | `82af79ca` |
+| PB-MPM, 4 iterations | 3 × 4 = 12 | all ✅ (mean J 0.992, spread 0.017) | **7.3 cm (0.7 %) · 0.103 m/s** | `50811741` |
+
+RMS speed [m/s] every 0.5 s (the slosh decay; both solvers see the same first impact ≈ 1.8–1.9 m/s):
+
+| t [s] | 0.5 | 1.0 | 1.5 | 2.0 | 3.0 | 4.0 | 5.0 | 6.0 | 7.0 | 7.5 | 8.0 |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| explicit 6×1 | 1.93 | 1.07 | 1.21 | 0.72 | 0.64 | 0.37 | 0.38 | 0.15 | 0.27 | 0.20 | 0.27 |
+| PB-MPM 3×2 | 1.80 | 0.90 | 1.03 | 0.52 | 0.54 | 0.27 | 0.21 | 0.15 | 0.17 | 0.07 | 0.12 |
+| PB-MPM 3×4 | 1.77 | 0.85 | 0.94 | 0.51 | 0.52 | 0.27 | 0.20 | 0.10 | 0.16 | 0.04 | 0.10 |
+
+Reading:
+
+* At the **same six lattice transfers per tick**, PB-MPM settles closer to the analytic height (2.5 % vs 4.5 % low — the
+  explicit column sits compressed by construction of κ), damps the slosh faster (0.12 vs 0.27 m/s at 8 s; the explicit
+  water keeps ringing acoustically, which is what tripped its settle proof at 8 s) and holds its volume proof (mean J
+  0.98 — the residual 2 % is the first-order det(I + D) integration, corrected by the lattice blend only in compression).
+* Doubling the iterations (12 transfers) buys another 1.8 % of height and a stiffer look, at twice the cost; the 4-iteration
+  water is essentially incompressible (spread of J 0.017). EA ships 2 iterations; that stays the default.
+* The **cost knob is transfers per tick**. PB-MPM spends them on iterations (stiffness) instead of on the speed of sound,
+  and drops `ScatterStress` (27 atomics + a density gather per particle — the most expensive kernel) from every transfer;
+  at 64 cells the explicit planner needs 12 sub-steps to PB-MPM's 4 × 2, at 128 cells 24 to 8 × 2. That is the number to
+  confirm on the GTX with `&perkernel=1`.
+
+Frames: `References/Figures/ProjectFluid_PbMpm_1s_32cells_SwiftShader.png` (1 s, the column hitting the far wall as a
+sheet rather than as droplets) and `…_PbMpm_8s_32cells_SwiftShader.png` (settled, 8 s, level surface).
+
 ### 4.3 What the user runs on the GTX (Windows, Chrome/Edge 113+)
 
 ```
@@ -151,14 +220,15 @@ powershell -File Projects\Project-Fluid\Build\ToolchainSequence.ps1             
 powershell -File Projects\Project-Fluid\Build\ToolchainSequence.ps1 -Proof        # 8 s PASS/FAIL run, prints the trace hash
 ```
 Then: `?resolution=64` (~74 k particles), `96` (~280 k), `128` (~700 k); `&perkernel=1` for per-kernel ms; `&scale=1`
-for the RTX rendering setting; the CSV button exports the table. The numbers to bring back are the **ms/tick per kernel
-at 64 and 96** and the largest resolution that holds 60 Hz — those decide T1's particle budget on that card.
+for the RTX rendering setting; `&solver=explicit` for the MLS-MPM baseline, `&iterations=3` for stiffer PB-MPM water;
+the CSV button exports the table. The numbers to bring back are the **ms/tick per kernel at 64 and 96 for both
+solvers** and the largest resolution that holds 60 Hz — those decide T1's particle budget on that card.
 
 ### 4.4 Next steps (each a small, measurable experiment; no C++ until F1 exits)
 
 | Step | Experiment | Measures | Source |
 |---|---|---|---|
-| **F1.3 PB-MPM** | Replace the explicit stress step by k P2G↔G2P iterations (EA reference); same storage | stability at 1 sub-step vs cost of k iterations | [3][4] |
+| ~~**F1.3 PB-MPM**~~ | ✅ done (§4.2b): k Jacobi iterations per sub-step, volume proof, both solvers selectable | on the GTX: ms/tick PB-MPM 3×2 vs explicit 6×1 at 64/96 cells | [3][4] |
 | **F1.4 Collider** | A kinematic box (Jolt-shaped SDF) dragged through the water, one-way; then impulse sums read back for two-way Jolt coupling | splash correctness, readback latency | Project-Physics `RigidBodySolver` |
 | **F1.5 Adaptive LOD** | Camera-distance particle merging/splitting on the MPM solver (the cheap form of [10][11][15]) | speed-up at equal look | [15] |
 | **F1.6 Subgroups** | `enable subgroups` for the proof/mass reductions and a sorted P2G (fewer atomics) | P2G ms | [23] |

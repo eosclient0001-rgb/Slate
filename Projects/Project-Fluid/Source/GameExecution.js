@@ -13,15 +13,17 @@
 //        finite        no NaN/Inf in any record; the fixed-point saturation counter stays at zero (speed clamps are reported)
 //        settle        after the run the free surface is level: mean particle height → SettledHeight / 2 within 15 %,
 //                      RMS speed < 0.2 m/s
+//        volume        position-based only: mean volume ratio J within 5 % of 1 at every proof
 //        determinism   two runs with the same settings give the same FNV-1a hash of the positions (same GPU/browser)
 //
-//    Query string: ?resolution=64&seconds=8&proof=1&mode=0&scale=0.5&stiffness=10000&substeps=auto
-//    (proof=0 keeps the invariants — containment, mass, finite — on the final tick but skips the settle judgement, for
-//    short timing runs; seconds=0 runs until the tab closes.)
+//    Query string: ?resolution=64&seconds=8&proof=1&fixed=1&mode=0&scale=0.5&solver=positionbased&iterations=2&substeps=auto
+//    (solver=explicit selects the MLS-MPM baseline with stiffness=κ; fixed=1 makes each tick wait for the GPU so the proof
+//    series is complete; proof=0 keeps the invariants — containment, mass, finite — on the final tick but skips the
+//    settle judgement, for short timing runs; seconds=0 runs until the tab closes.)
 //    Exit status is written to #status and window.ProjectFluidExit (0 pass · 2 proof failed · 1 refusal — no WebGPU).
 
 import { DescribeDamBreak, PredictParticleCount, DomainSize } from "./DamBreakStructure.js";
-import { LiquidSolver, DefaultTuning } from "./LiquidSolver.js";
+import { LiquidSolver, DefaultTuning, Methods } from "./LiquidSolver.js";
 import { SurfaceProjection } from "./SurfaceProjection.js";
 import { TimingMetrics } from "./TimingMetrics.js";
 
@@ -37,8 +39,8 @@ const Host = {
     Device: null, Context: null, Format: null,
     Scene: null, Solver: null, Surface: null, Metrics: null,
     Settings: null,
-    Accumulator: 0.0, LastStamp: 0.0, Dropped: 0, Ticks: 0, SubStepsPerTick: 1, SubStepSeconds: TickSeconds,
-    Running: true, Finished: false, Proofs: [], Failures: [], TraceHash: null,
+    Accumulator: 0.0, LastStamp: 0.0, Dropped: 0, Ticks: 0, SubStepsPerTick: 1, SubStepSeconds: TickSeconds, Recipe: "",
+    Running: true, Finished: false, Proofs: [], Failures: [], TraceHash: null, LastProofTick: 0, Gate: false,
     Elements: {},
 };
 
@@ -52,11 +54,15 @@ function ReadSettings()
         Proof:       q.get("proof") !== "0",
         Mode:        Math.round(Number_("mode", 0)),
         Scale:       Number_("scale", 0.5),
+        Solver:      q.get("solver") === "explicit" ? Methods.Explicit : Methods.PositionBased,
+        Iterations:  Math.round(Number_("iterations", DefaultTuning.Iterations)),
         Stiffness:   Number_("stiffness", DefaultTuning.Stiffness),
         Viscosity:   Number_("viscosity", DefaultTuning.Viscosity),
+        Relaxation:  Number_("relaxation", DefaultTuning.VolumeRelaxation),
+        Shear:       Number_("shear", DefaultTuning.ShearRelaxation),
         SubSteps:    q.get("substeps") ?? "auto",
         PerKernel:   q.get("perkernel") === "1",
-        Fixed:       q.get("fixed") === "1",                     // one tick per animation frame, no wall-clock accumulator
+        Fixed:       q.get("fixed") === "1",                     // one tick per animation frame, GPU-synchronous, no wall-clock accumulator
         Offscreen:   q.get("offscreen") === "1",                 // harness: shade into a texture, expose window.ProjectFluidCapture()
     };
 }
@@ -68,7 +74,7 @@ function ReadSettings()
 async function Start()
 {
     const E = Host.Elements;
-    for (const id of ["canvas", "status", "telemetry", "proofs", "resolution", "resolutionLabel", "mode", "scale", "stiffness", "substeps", "restart", "pause", "csv", "particles"])
+    for (const id of ["canvas", "status", "telemetry", "proofs", "resolution", "resolutionLabel", "mode", "scale", "solver", "iterations", "stiffness", "substeps", "restart", "pause", "csv", "particles"])
     {
         E[id] = document.getElementById(id);
     }
@@ -76,6 +82,8 @@ async function Start()
     E.resolution.value = Host.Settings.Resolution;
     E.mode.value       = Host.Settings.Mode;
     E.scale.value      = Host.Settings.Scale;
+    E.solver.value     = Host.Settings.Solver;
+    E.iterations.value = String(Host.Settings.Iterations);
     E.stiffness.value  = Host.Settings.Stiffness;
     E.substeps.value   = Host.Settings.SubSteps;
     E.resolutionLabel.textContent = `${Host.Settings.Resolution} cells → ${PredictParticleCount(Host.Settings.Resolution).toLocaleString()} particles`;
@@ -86,6 +94,8 @@ async function Start()
     E.mode.addEventListener("change", () => { if (Host.Surface) { Host.Surface.Mode = parseInt(E.mode.value, 10); } });
     E.scale.addEventListener("change", () => { if (Host.Surface) { Host.Surface.Scale = parseFloat(E.scale.value); } });
     E.stiffness.addEventListener("change", () => { if (Host.Solver) { Host.Solver.SetTuning({ Stiffness: parseFloat(E.stiffness.value) }); PlanSubSteps(); } });
+    E.iterations.addEventListener("change", () => { if (Host.Solver) { Host.Solver.SetTuning({ Iterations: parseInt(E.iterations.value, 10) }); PlanSubSteps(); } });
+    E.solver.addEventListener("change", () => { if (Host.Solver) { Host.Solver.SetTuning({ Method: E.solver.value }); PlanSubSteps(); } });
     E.substeps.addEventListener("change", () => PlanSubSteps());
     InstallOrbit(E.canvas);
 
@@ -131,16 +141,22 @@ async function Restart()
 {
     const E = Host.Elements;
     Host.Settings.Resolution = Math.round(parseFloat(E.resolution.value));
+    Host.Settings.Solver     = E.solver.value;
+    Host.Settings.Iterations = parseInt(E.iterations.value, 10);
     Host.Settings.Stiffness  = parseFloat(E.stiffness.value);
     Host.Settings.SubSteps   = E.substeps.value;
     Host.Solver?.Destroy();
     Host.Scene  = DescribeDamBreak({ Resolution: Host.Settings.Resolution });
-    Host.Solver = await LiquidSolver.Create(Host.Device, Host.Scene, { Stiffness: Host.Settings.Stiffness, Viscosity: Host.Settings.Viscosity });
+    Host.Solver = await LiquidSolver.Create(Host.Device, Host.Scene, {
+        Method: Host.Settings.Solver, Iterations: Host.Settings.Iterations,
+        Stiffness: Host.Settings.Stiffness, Viscosity: Host.Settings.Viscosity,
+        VolumeRelaxation: Host.Settings.Relaxation, ShearRelaxation: Host.Settings.Shear,
+    });
     Host.Surface.AttachScene(Host.Scene, Host.Solver.Records);
     Host.Metrics.Reset();
     Host.Accumulator = 0.0;
     Host.LastStamp   = performance.now();
-    Host.Ticks = 0; Host.Dropped = 0; Host.Proofs = []; Host.Failures = []; Host.Finished = false; Host.TraceHash = null;
+    Host.Ticks = 0; Host.Dropped = 0; Host.Proofs = []; Host.Failures = []; Host.Finished = false; Host.TraceHash = null; Host.LastProofTick = 0; Host.Gate = false;
     Host.Running = true;
     E.pause.textContent = "Pause";
     E.proofs.textContent = "";
@@ -155,8 +171,12 @@ function PlanSubSteps()
     const requested = Host.Elements.substeps.value;
     Host.SubStepsPerTick = requested === "auto" ? plan.SubSteps : Math.max(1, parseInt(requested, 10) || plan.SubSteps);
     Host.SubStepSeconds  = TickSeconds / Host.SubStepsPerTick;
-    const courant = (plan.SoundSpeed + plan.ReferenceSpeed) * Host.SubStepSeconds / Host.Scene.CellSize;
-    Host.Elements.substeps.title = `c₀ ${plan.SoundSpeed.toFixed(1)} m/s · v_ref ${plan.ReferenceSpeed.toFixed(1)} m/s · auto = ${plan.SubSteps} · Courant ${courant.toFixed(2)}`;
+    const explicit = plan.Method === Methods.Explicit;
+    const courant  = ((explicit ? plan.SoundSpeed : 0.0) + plan.ReferenceSpeed) * Host.SubStepSeconds / Host.Scene.CellSize;
+    Host.Elements.substeps.title = `${explicit ? `c₀ ${plan.SoundSpeed.toFixed(1)} m/s · ` : ""}v_ref ${plan.ReferenceSpeed.toFixed(1)} m/s · auto = ${plan.SubSteps} · Courant ${courant.toFixed(2)}`;
+    Host.Elements.iterations.disabled = explicit;
+    Host.Elements.stiffness.disabled  = !explicit;
+    Host.Recipe = explicit ? `explicit MLS-MPM · ${Host.SubStepsPerTick} sub-steps` : `PB-MPM · ${Host.SubStepsPerTick} sub-steps × ${plan.Iterations} iterations = ${Host.SubStepsPerTick * plan.Iterations} transfers/tick`;
 }
 
 //------------------------------------------------------------------------------------------------------------------------
@@ -179,6 +199,13 @@ function Pulse(stamp)
     let ticks = 0;
     if (Host.Settings.Fixed)
     {
+        // Fixed mode is the proof mode: the next tick is not encoded until the GPU has finished the previous one, so the
+        // proof series (every 30 ticks) is complete on any GPU — without the gate a slow or emulated GPU falls hundreds
+        // of ticks behind the encoder and every proof but the first and last is skipped as "readback still in flight".
+        if (Host.Gate)
+        {
+            return;
+        }
         ticks = 1;
     }
     else
@@ -218,9 +245,16 @@ function Pulse(stamp)
         Host.Solver.Advance(encoder, Host.SubStepsPerTick, Host.SubStepSeconds, metrics);
         Host.Ticks++;
         const lastTick = Host.Settings.Seconds > 0 && Host.Ticks * TickSeconds >= Host.Settings.Seconds;
-        if (!proofRecorded && ((Host.Settings.Proof && Host.Ticks % ProofInterval === 0) || lastTick))
+        // A proof is due every ProofInterval ticks; when the previous readback is still in flight (slow GPU) it stays
+        // due until RecordProof accepts it, so the time series has no holes — it just slips a few ticks.
+        const proofDue = Host.Settings.Proof && Host.Ticks - Host.LastProofTick >= ProofInterval;
+        if (!proofRecorded && (proofDue || lastTick))
         {
             proofRecorded = Host.Solver.RecordProof(encoder, metrics);
+            if (proofRecorded)
+            {
+                Host.LastProofTick = Host.Ticks;
+            }
         }
         if (lastTick)
         {
@@ -233,6 +267,11 @@ function Pulse(stamp)
     metrics.End(encoder);
     Host.Device.queue.submit([encoder.finish()]);
     metrics.RecordWall(performance.now() - wallBegin);
+    if (Host.Settings.Fixed)
+    {
+        Host.Gate = true;
+        Host.Device.queue.onSubmittedWorkDone().then(() => { Host.Gate = false; });
+    }
 
     metrics.Collect().then(() => Telemetry());
     if (proofRecorded)
@@ -264,6 +303,13 @@ function Judge(record, final)
     {
         rows.push(`⚠️ speed clamp fired ${record.SpeedClamps}× since the last proof (splash spikes above ${Host.Solver.Tuning.MaxSpeed} m/s — not a failure, but watch the settle proof)`);
     }
+    if (Host.Solver.PositionBased)
+    {
+        // Volume proof (position-based only): the particle-integrated volume ratio must stay near 1 on average. The
+        // explicit method re-measures density every sub-step and never touches J, so it is exempt.
+        const drift = Math.abs(record.MeanVolume - 1.0);
+        Check("volume", drift < 0.05, `mean J ${record.MeanVolume.toFixed(4)} (RMS spread ${record.VolumeSpread.toFixed(3)}, min ${record.MinVolume.toFixed(2)}, max ${record.MaxVolume.toFixed(2)})`);
+    }
     if (final && Host.Settings.Proof)
     {
         // The settle proof needs the sloshing to have died down: ≥ 6 s at 32–64 cells (energy halves every ~2 s).
@@ -274,7 +320,10 @@ function Judge(record, final)
     }
     Host.Proofs.push({ ...record, Rows: rows });
     const E = Host.Elements;
-    E.proofs.textContent = `t = ${record.Time.toFixed(2)} s · tick ${record.Tick}\n` + rows.join("\n") + `\nRMS speed ${record.MeanSpeed.toFixed(3)} m/s · mean height ${((record.MeanHeight - s.FloorHeight) * 100).toFixed(1)} cm`;
+    const summary = `RMS speed ${record.MeanSpeed.toFixed(3)} m/s · mean height ${((record.MeanHeight - s.FloorHeight) * 100).toFixed(1)} cm` +
+                    (Host.Solver.PositionBased ? ` · mean J ${record.MeanVolume.toFixed(4)}` : "");
+    E.proofs.textContent = `t = ${record.Time.toFixed(2)} s · tick ${record.Tick}\n` + rows.join("\n") + "\n" + summary;
+    console.log(`[Project-Fluid] proof t=${record.Time.toFixed(2)} ${rows.every(r => r.startsWith("✅") || r.startsWith("⚠️")) ? "ok" : "FAIL"} · ${summary}`);   // the time series for headless runs
 }
 
 function Conclude()
@@ -284,7 +333,7 @@ function Conclude()
     const exit = failed ? 2 : 0;
     window.ProjectFluidExit = exit;
     const lines = [
-        `${failed ? "❌ FAIL" : "✅ PASS"} — ${Host.Ticks} ticks in ${Host.Settings.Seconds} s simulated, ${Host.Dropped} dropped, ${Host.SubStepsPerTick} sub-steps/tick`,
+        `${failed ? "❌ FAIL" : "✅ PASS"} — ${Host.Ticks} ticks in ${Host.Settings.Seconds} s simulated, ${Host.Dropped} dropped, ${Host.Recipe}`,
         `trace hash ${Host.TraceHash.toString(16).padStart(8, "0")} (run twice with the same URL: must match)`,
         ...Host.Failures,
     ];
@@ -303,7 +352,7 @@ function Telemetry()
     const rows = m.Rows().map(r => `${r.Label.padEnd(16)} ${r.PerTick.toFixed(3).padStart(8)} ms/tick`);
     const gpuTotal = m.Rows().reduce((sum, r) => sum + r.PerTick, 0.0);
     Host.Elements.telemetry.textContent =
-        `wall ${m.WallAverage.toFixed(2)} ms/frame (CPU encode) · GPU ${gpuTotal.toFixed(2)} ms/tick · ${Host.Ticks} ticks · ${Host.Dropped} dropped · ${Host.SubStepsPerTick} sub-steps\n` + rows.join("\n");
+        `wall ${m.WallAverage.toFixed(2)} ms/frame (CPU encode) · GPU ${gpuTotal.toFixed(2)} ms/tick · ${Host.Ticks} ticks · ${Host.Dropped} dropped · ${Host.Recipe}\n` + rows.join("\n");
 }
 
 function Status(text)

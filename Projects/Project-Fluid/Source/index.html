@@ -40,12 +40,21 @@
     <pre id="particles"></pre>
     <label for="resolution">Resolution <span id="resolutionLabel"></span></label>
     <input id="resolution" type="range" min="32" max="160" step="8" value="64">
-    <label for="stiffness">Stiffness κ [Pa]</label>
+    <label for="solver">Solver</label>
+    <select id="solver">
+        <option value="positionbased">position-based MPM (PB-MPM, EA SEED 2024)</option>
+        <option value="explicit">explicit MLS-MPM (Tait EOS)</option>
+    </select>
+    <label for="iterations">Iterations per sub-step (position-based)</label>
+    <select id="iterations">
+        <option>1</option><option selected>2</option><option>3</option><option>4</option><option>6</option><option>8</option>
+    </select>
+    <label for="stiffness">Stiffness κ [Pa] (explicit)</label>
     <input id="stiffness" type="number" min="500" max="100000" step="500" value="10000">
     <label for="substeps">Sub-steps per tick</label>
     <select id="substeps">
         <option value="auto">auto (Courant 0.6)</option>
-        <option>1</option><option>2</option><option>3</option><option>4</option><option>6</option><option>8</option>
+        <option>1</option><option>2</option><option>3</option><option>4</option><option>6</option><option>8</option><option>12</option>
     </select>
     <button id="restart">Restart</button>
     <button id="pause" class="secondary">Pause</button>
@@ -74,7 +83,8 @@
     <pre id="proofs">—</pre>
     <div class="hint" style="margin-top:10px">
         Proof run: <code>?seconds=8&amp;proof=1&amp;fixed=1</code> — ends with PASS/FAIL and a trace hash. Add
-        <code>&amp;perkernel=1</code> for per-kernel GPU timings, <code>&amp;resolution=96</code> for ~280 k particles.
+        <code>&amp;perkernel=1</code> for per-kernel GPU timings, <code>&amp;resolution=96</code> for ~280 k particles,
+        <code>&amp;solver=explicit</code> for the MLS-MPM baseline, <code>&amp;iterations=3</code> for stiffer PB-MPM water.
     </div>
 </aside>
 <script type="module" src="./GameExecution.js"></script>

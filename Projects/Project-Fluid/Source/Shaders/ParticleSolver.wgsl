@@ -1,16 +1,29 @@
 //============================================================================================================================================
-// 📦 Frontier/Projects/Project-Fluid/Source/Shaders/ParticleSolver.wgsl — MLS-MPM Water Kernels (fixed-point lattice scatter, WGSL)
+// 📦 Frontier/Projects/Project-Fluid/Source/Shaders/ParticleSolver.wgsl — MPM Water Kernels (PB-MPM · explicit MLS-MPM, fixed-point P2G)
 //============================================================================================================================================
 //
-//    One sub-step = five compute dispatches in this order:
-//        ClearLattice → ScatterMass (P2G-1) → ScatterStress (P2G-2) → AdvanceLattice → GatherParticles (G2P)
-//    A sixth entry point, ReduceProof, is recorded on demand and writes per-workgroup partial sums that the host adds up.
+//    Two methods share one kernel set and one particle record; Constants.Method selects the sub-step recipe:
 //
-//    Method: moving-least-squares material point method (Hu et al. 2018) with APIC transfers and a quadratic B-spline
-//    stencil (3×3×3 sites), weakly compressible water through a Tait-style equation of state p = κ((ρ/ρ₀)^γ − 1), density
-//    re-estimated from the lattice every sub-step (no deformation gradient). Lattice mass and momentum are accumulated
+//      0  explicit MLS-MPM (Hu et al. 2018) — one dispatch chain per sub-step:
+//             ClearLattice → ScatterMass (P2G-1) → ScatterStress (P2G-2) → AdvanceLattice → GatherParticles (G2P)
+//         Weakly compressible water through a Tait-style equation of state p = κ((ρ/ρ₀)^γ − 1), density re-estimated from
+//         the lattice every sub-step (no deformation gradient). The sub-step is bounded by the acoustic Courant number.
+//
+//      1  position-based MPM (Lewin, EA SEED, SIGGRAPH 2024) — k iterations per sub-step, no stiffness, no sound speed:
+//             [ ProjectVolume → ClearLattice → ScatterMass → AdvanceLattice → GatherParticles ] × k
+//         Each iteration projects the particle's displacement gradient D = C·Δτ toward volume preservation
+//         (1 + tr(D + αI))·J = 1, then the lattice transfer averages the proposals mass-weighted (a Jacobi solve on the
+//         lattice). Gravity enters on iteration 0 only; the last iteration integrates J and advects. J (the volume
+//         ratio det F) lives in Particle.Volume and is blended toward the lattice-measured ratio when compressed, which
+//         is what stops it drifting (EA's "grid volume for liquid"). Bounded by the advection Courant number only.
+//
+//    Both use APIC transfers and a quadratic B-spline stencil (3×3×3 sites). Lattice mass and momentum are accumulated
 //    with atomicAdd on i32 fixed-point quanta because WGSL only has integer atomics; per-contribution saturation is
-//    counted in Tally[0] and speed clamps in Tally[1]; the host clears both whenever it reads a proof.
+//    counted in Tally[0] and speed clamps in Tally[1]; the host clears both whenever it reads a proof. ReduceProof is
+//    recorded on demand and writes per-workgroup partial sums that the host adds up.
+//
+//    Constants arrive as one 256-byte slice per iteration (dynamic uniform offset), so the same bind group serves every
+//    dispatch; only Gravity, Integrate and Iteration differ between slices.
 //
 //    Units: metres, seconds, kilograms; right-handed, +Z up (gravity is (0, 0, −9.81)). Lattice site (x, y, z) sits at
 //    position (x, y, z) · Δx; the domain spans [0, CellCount · Δx] and the fluid lives inside the WallMargin slab.
@@ -37,24 +50,38 @@ struct SolverConstants
     InverseMassQuantum    : f32,        // [1/kg]
     InverseMomentumQuantum: f32,        // [s/(kg·m)]
     MaxSpeed              : f32,        // [m/s]      safety clamp applied in G2P (counted in Tally[1])
-    Cohesion              : f32,        // [-]        tensile limit: p ≥ −Cohesion · κ (0 = no tension; keep ≪ hydrostatic head / κ)
-    Reserved0             : f32,
-    Reserved1             : f32,
+    Cohesion              : f32,        // [-]        explicit: tensile limit p ≥ −Cohesion · κ (0 = no tension; keep ≪ hydrostatic head / κ)
+    VolumeRelaxation      : f32,        // [-]        position-based: ω of the volume projection (1 = exact Jacobi step, 2 = over-relaxed)
+    ShearRelaxation       : f32,        // [-]        position-based: fraction of the strain part removed per iteration (viscosity)
+    VolumeBlend           : f32,        // [-]        position-based: J ← mix(J, J_lattice, VolumeBlend) when compressed
+    Integrate             : u32,        // [-]        1 = this dispatch advects, updates J and enforces walls (last iteration)
+    Method                : u32,        // [-]        0 = explicit MLS-MPM · 1 = position-based MPM
+    Iteration             : u32,        // [-]        index within the sub-step (informational)
+    Tension               : f32,        // [-]        position-based: largest contraction strain one iteration may propose (α ≥ −Tension)
 };
 
 struct Particle
 {
     Position : vec3<f32>,     // [m]
+    Volume   : f32,           // [-]    J = det F, volume ratio (position-based method; 1 at rest)
     Velocity : vec3<f32>,     // [m/s]
+    Reserve  : f32,           // [-]    unused lane (keeps the 80-byte stride explicit)
     Affine   : mat3x3<f32>,   // [1/s]  APIC velocity gradient C
 };
+
+const Identity : mat3x3<f32> = mat3x3<f32>(vec3<f32>(1.0, 0.0, 0.0), vec3<f32>(0.0, 1.0, 0.0), vec3<f32>(0.0, 0.0, 1.0));
+
+fn Trace(m: mat3x3<f32>) -> f32
+{
+    return m[0][0] + m[1][1] + m[2][2];
+}
 
 @group(0) @binding(0) var<uniform>             Constants       : SolverConstants;
 @group(0) @binding(1) var<storage, read_write> Particles       : array<Particle>;
 @group(0) @binding(2) var<storage, read_write> Lattice         : array<atomic<i32>>;   // 4 quanta per site: mass, momentum xyz
 @group(0) @binding(3) var<storage, read_write> LatticeVelocity : array<vec4<f32>>;     // xyz [m/s], w = site mass [kg]
 @group(0) @binding(4) var<storage, read_write> Tally           : array<atomic<u32>>;   // [0] saturations, [1] speed clamps
-@group(0) @binding(5) var<storage, read_write> ProofPartials   : array<vec4<f32>>;     // per workgroup: count, Σ|v|², Σz, max|v|
+@group(0) @binding(5) var<storage, read_write> ProofPartials   : array<vec4<f32>>;     // 2 per workgroup: see ReduceProof
 @group(0) @binding(6) var<storage, read_write> MassPartials    : array<f32>;           // per workgroup: Σ site mass [kg]
 
 //------------------------------------------------------------------------------------------------------------------------
@@ -208,8 +235,7 @@ fn ScatterStress(@builtin(global_invocation_id) id: vec3<u32>)
     let pressure = max(-Constants.Cohesion * Constants.Stiffness,
                        Constants.Stiffness * (pow(ratio, Constants.EosExponent) - 1.0));                             // [Pa]
     let strain   = particle.Affine + transpose(particle.Affine);                                              // [1/s]
-    let identity = mat3x3<f32>(vec3<f32>(1.0, 0.0, 0.0), vec3<f32>(0.0, 1.0, 0.0), vec3<f32>(0.0, 0.0, 1.0));
-    let stress   = -pressure * identity + Constants.Viscosity * strain;                                       // [Pa]
+    let stress   = -pressure * Identity + Constants.Viscosity * strain;                                       // [Pa]
     let scale    = -volume * 4.0 * Constants.InverseCellSize * Constants.InverseCellSize * Constants.TimeStep;  // [m·s]  → term·Δ·w is kg·m/s
     let term     = stress * scale;
 
@@ -230,6 +256,33 @@ fn ScatterStress(@builtin(global_invocation_id) id: vec3<u32>)
             }
         }
     }
+}
+
+//------------------------------------------------------------------------------------------------------------------------
+//                                  POSITION-BASED PROJECTION (EA SEED PB-MPM, LIQUID BRANCH)
+//------------------------------------------------------------------------------------------------------------------------
+// Works on D = C·Δτ, the dimensionless displacement gradient of this sub-step (EA's deformationDisplacement).
+//     shear    D ← D − ShearRelaxation · sym(D)                     removes strain, keeps rotation → viscosity
+//     volume   α = (1/J − 1 − tr D) / 3 ;  D ← D + ω·α·I            so that (1 + tr(D + αI))·J → 1 (3 = trace of I in 3-D)
+// α < 0 contracts an over-expanded particle — that pull is the cohesion that holds sheets and drops together. It is
+// floored at −Tension only as a safety net: a particle that has been stretched far past J = 1/(1 − 3·Tension) must not
+// slam its neighbours with a one-iteration collapse.
+
+@compute @workgroup_size(64)
+fn ProjectVolume(@builtin(global_invocation_id) id: vec3<u32>)
+{
+    if (id.x >= Constants.ParticleCount)
+    {
+        return;
+    }
+    var particle = Particles[id.x];
+    let dt       = Constants.TimeStep;
+    var D        = particle.Affine * dt;                                                        // [-]
+    D            = D - Constants.ShearRelaxation * 0.5 * (D + transpose(D));
+    let alpha    = max((1.0 / max(particle.Volume, 0.1) - 1.0 - Trace(D)) / 3.0, -Constants.Tension);
+    D            = D + Constants.VolumeRelaxation * alpha * Identity;
+    particle.Affine = D * (1.0 / dt);
+    Particles[id.x] = particle;
 }
 
 //------------------------------------------------------------------------------------------------------------------------
@@ -263,13 +316,16 @@ fn AdvanceLattice(@builtin(global_invocation_id) id: vec3<u32>,
             let site = vec3<f32>(f32(x), f32(y), f32(z));
             let high = vec3<f32>(Constants.CellCount) - 1.0 - Constants.WallMargin;
 
-            // Separating slip wall: a site inside the margin may not carry velocity into the wall.
-            if (site.x < Constants.WallMargin && velocity.x < 0.0) { velocity.x = 0.0; }
-            if (site.y < Constants.WallMargin && velocity.y < 0.0) { velocity.y = 0.0; }
-            if (site.z < Constants.WallMargin && velocity.z < 0.0) { velocity.z = 0.0; }
-            if (site.x > high.x && velocity.x > 0.0) { velocity.x = 0.0; }
-            if (site.y > high.y && velocity.y > 0.0) { velocity.y = 0.0; }
-            if (site.z > high.z && velocity.z > 0.0) { velocity.z = 0.0; }
+            // Separating slip wall: a site on or beyond a wall plane may not carry velocity into the wall. The plane site
+            // itself must be included — a particle resting on the plane draws 87.5 % of its velocity from the plane site
+            // and the one behind it; leaving the plane site free makes the wall soft by half a cell and lets impact
+            // pressure drive particles through it (seen as containment misses and wall-bounce jitter).
+            if (site.x <= Constants.WallMargin && velocity.x < 0.0) { velocity.x = 0.0; }
+            if (site.y <= Constants.WallMargin && velocity.y < 0.0) { velocity.y = 0.0; }
+            if (site.z <= Constants.WallMargin && velocity.z < 0.0) { velocity.z = 0.0; }
+            if (site.x >= high.x && velocity.x > 0.0) { velocity.x = 0.0; }
+            if (site.y >= high.y && velocity.y > 0.0) { velocity.y = 0.0; }
+            if (site.z >= high.z && velocity.z > 0.0) { velocity.z = 0.0; }
         }
         LatticeVelocity[id.x] = vec4<f32>(velocity, mass);
     }
@@ -332,6 +388,40 @@ fn GatherParticles(@builtin(global_invocation_id) id: vec3<u32>)
 
     particle.Affine   = affine * (4.0 * Constants.InverseCellSize * Constants.InverseCellSize);
     particle.Velocity = velocity;
+
+    if (Constants.Integrate == 0u)
+    {
+        Particles[id.x] = particle;   // intermediate position-based iteration: proposals only, no motion yet
+        return;
+    }
+
+    if (Constants.Method == 1u)
+    {
+        // Volume ratio measured on the lattice (mirrored at the walls): J_lattice = ρ₀ / ρ_lattice. Pull J toward it only
+        // when compressed — in tension the lattice and the integrated volume disagree by design (EA's rule) — then
+        // integrate J with the divergence of this sub-step: det(I + D) ≈ 1 + tr D.
+        let cellVolume = Constants.CellSize * Constants.CellSize * Constants.CellSize;
+        var density = 0.0;
+        for (var i = 0u; i < 3u; i++)
+        {
+            for (var j = 0u; j < 3u; j++)
+            {
+                for (var k = 0u; k < 3u; k++)
+                {
+                    let weight = stencil.Weights[i].x * stencil.Weights[j].y * stencil.Weights[k].z;
+                    let site   = stencil.Anchor + vec3<i32>(i32(i), i32(j), i32(k));
+                    density   += weight * MirroredSiteMass(site) / cellVolume;
+                }
+            }
+        }
+        let latticeVolume = Constants.RestDensity / max(density, 1.0e-6);
+        if (latticeVolume < 1.0)
+        {
+            particle.Volume = mix(particle.Volume, latticeVolume, Constants.VolumeBlend);
+        }
+        particle.Volume = clamp(particle.Volume * (1.0 + Trace(particle.Affine) * Constants.TimeStep), 0.1, 10.0);
+    }
+
     particle.Position = particle.Position + velocity * Constants.TimeStep;
 
     // Look three sub-steps ahead; a particle about to cross a wall plane has its normal velocity reduced so it arrives
@@ -353,9 +443,10 @@ fn GatherParticles(@builtin(global_invocation_id) id: vec3<u32>)
 //------------------------------------------------------------------------------------------------------------------------
 //                                              PROOF REDUCTION (ON DEMAND)
 //------------------------------------------------------------------------------------------------------------------------
-// Per workgroup: (particles within half a cell of the wall planes with finite velocity, Σ|v|², Σz, max|v|). A particle
-// that reached the hard clamp lies a full cell outside the plane, so it counts as escaped: the clamp doubles as the
-// tunnelling detector and "inside" coincides with the visible container of DamBreakStructure.
+// Two vec4 per workgroup: (particles within half a cell of the wall planes with finite velocity, Σ|v|², Σz, max|v|) and
+// (ΣJ, min J, max J, Σ(J − 1)²) over the same particles — the volume statistics judge the position-based method. A
+// particle that reached the hard clamp lies a full cell outside the plane, so it counts as escaped: the clamp doubles as
+// the tunnelling detector and "inside" coincides with the visible container of DamBreakStructure.
 
 // Exponent bits all set = Inf or NaN. Done on the bit pattern because WGSL float comparisons with NaN are unspecified.
 fn Finite(v: vec3<f32>) -> bool
@@ -368,6 +459,7 @@ var<workgroup> SharedCount  : array<f32, 256>;
 var<workgroup> SharedEnergy : array<f32, 256>;
 var<workgroup> SharedHeight : array<f32, 256>;
 var<workgroup> SharedSpeed  : array<f32, 256>;
+var<workgroup> SharedVolume : array<vec4<f32>, 256>;   // ΣJ, min J, max J, Σ(J − 1)²
 
 @compute @workgroup_size(256)
 fn ReduceProof(@builtin(global_invocation_id) id: vec3<u32>,
@@ -378,6 +470,7 @@ fn ReduceProof(@builtin(global_invocation_id) id: vec3<u32>,
     var energy = 0.0;
     var height = 0.0;
     var speed  = 0.0;
+    var volume = vec4<f32>(0.0, 1.0e9, -1.0e9, 0.0);
     if (id.x < Constants.ParticleCount)
     {
         let particle = Particles[id.x];
@@ -391,12 +484,14 @@ fn ReduceProof(@builtin(global_invocation_id) id: vec3<u32>,
             energy = dot(particle.Velocity, particle.Velocity);
             height = particle.Position.z;
             speed  = length(particle.Velocity);
+            volume = vec4<f32>(particle.Volume, particle.Volume, particle.Volume, (particle.Volume - 1.0) * (particle.Volume - 1.0));
         }
     }
     SharedCount[local.x]  = count;
     SharedEnergy[local.x] = energy;
     SharedHeight[local.x] = height;
     SharedSpeed[local.x]  = speed;
+    SharedVolume[local.x] = volume;
     workgroupBarrier();
     for (var stride = 128u; stride > 0u; stride = stride >> 1u)
     {
@@ -406,11 +501,15 @@ fn ReduceProof(@builtin(global_invocation_id) id: vec3<u32>,
             SharedEnergy[local.x] += SharedEnergy[local.x + stride];
             SharedHeight[local.x] += SharedHeight[local.x + stride];
             SharedSpeed[local.x]   = max(SharedSpeed[local.x], SharedSpeed[local.x + stride]);
+            let other = SharedVolume[local.x + stride];
+            SharedVolume[local.x] = vec4<f32>(SharedVolume[local.x].x + other.x, min(SharedVolume[local.x].y, other.y),
+                                              max(SharedVolume[local.x].z, other.z), SharedVolume[local.x].w + other.w);
         }
         workgroupBarrier();
     }
     if (local.x == 0u)
     {
-        ProofPartials[group.x] = vec4<f32>(SharedCount[0], SharedEnergy[0], SharedHeight[0], SharedSpeed[0]);
+        ProofPartials[group.x * 2u]      = vec4<f32>(SharedCount[0], SharedEnergy[0], SharedHeight[0], SharedSpeed[0]);
+        ProofPartials[group.x * 2u + 1u] = SharedVolume[0];
     }
 }

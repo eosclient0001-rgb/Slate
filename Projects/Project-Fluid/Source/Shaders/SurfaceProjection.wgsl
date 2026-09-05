@@ -165,10 +165,12 @@ fn BackgroundFragmentMain(input: CoverVertex) -> BackgroundOutput
 //                                              SPRITE + THICKNESS RASTER
 //------------------------------------------------------------------------------------------------------------------------
 
-struct Particle
+struct Particle   // identical to ParticleSolver.wgsl (80 B)
 {
     Position : vec3<f32>,
+    Volume   : f32,
     Velocity : vec3<f32>,
+    Reserve  : f32,
     Affine   : mat3x3<f32>,
 };
 

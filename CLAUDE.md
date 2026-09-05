@@ -123,7 +123,8 @@ powershell -File Projects\Project-Fluid\Build\ToolchainSequence.ps1 -Check      
 bash Projects/Project-Fluid/Build/ToolchainSequence.sh --port 8765               # Linux/macOS (python3 http.server)
 ```
 - Needs Chrome/Edge 113+, Firefox 141+ or Safari 26; on Windows the GPU is reached through D3D12 (check `chrome://gpu` → WebGPU)
-- Query: `resolution=32…160` (5 k → 1.4 M particles), `seconds=N` (0 = endless), `proof=1`, `fixed=1`, `perkernel=1`, `scale=0.25…1`, `mode=0…3`
+- Query: `resolution=32…160` (5 k → 1.4 M particles), `seconds=N` (0 = endless), `proof=1`, `fixed=1`, `perkernel=1`, `scale=0.25…1`, `mode=0…3`,
+  `solver=positionbased|explicit` (default PB-MPM, EA SEED 2024; explicit = MLS-MPM + Tait EOS), `iterations=1…8`, `stiffness=κ`, `substeps=auto|N`
 - Exit status in `window.ProjectFluidExit` and `#status`: 0 proofs passed, 2 a proof failed, 1 refusal (no WebGPU)
 - Survey + plan: `References/FluidPhaseF1-RecentSurveyAndWebGpuPlan.md` (2023–2026 sources); background: `FluidPhaseF0-SurveyAndPlan.md`
 
@@ -257,7 +258,7 @@ Frontier/
 │   │   └── Source/
 │   │       ├── GameExecution.cpp   ← main loop: Solver.Advance(Δτ) → Solver.QueryPoses(); free-fall + no-tunnel proof
 │   │       └── DropSceneStructure.h/.cpp
-│   ├── Project-Fluid/              ← WebGPU fluid testbed (browser page, no C++): MLS-MPM dam-break + screen-space surface
+│   ├── Project-Fluid/              ← WebGPU fluid testbed (browser page, no C++): PB-MPM / MLS-MPM dam-break + screen-space surface
 │   │   ├── Build/ToolchainSequence.ps1/.sh   ← static HTTP server (the browser is the toolchain); -Check validates headers
 │   │   └── Source/
 │   │       ├── index.html, GameExecution.js  ← 60 Hz tick accumulator → LiquidSolver.Advance → Present → proofs (exit 0/2/1)

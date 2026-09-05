@@ -9,7 +9,7 @@
 //
 //    Units: nanoseconds on the GPU, reported in milliseconds.
 
-const MaxSlots = 64;
+const MaxSlots = 256;   // per-kernel timing at 12 sub-steps × 2 iterations × 5 kernels needs 120 + presentation
 
 export class TimingMetrics
 {
