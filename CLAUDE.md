@@ -115,6 +115,18 @@ bash Projects/Project-Physics/Build/ToolchainSequence.sh --run -- --fixed --seco
 - Writes `Diagnostics/ProjectPhysics_TelemetryReport.md`; exit 0 proof OK, 2 proof failed (tunnelled / free fall off), 1 bring-up refusal
 - Merge plan into Project-Zero: `References/PhysicsPhaseP1-JoltBringUp.md`
 
+### Project-Fluid (WebGPU fluid testbed — browser page, no compiler, self-proving)
+```powershell
+powershell -File Projects\Project-Fluid\Build\ToolchainSequence.ps1              # serve Source/ on http://localhost:8765/ and open it
+powershell -File Projects\Project-Fluid\Build\ToolchainSequence.ps1 -Proof       # opens ?seconds=8&proof=1&fixed=1 → PASS/FAIL + trace hash
+powershell -File Projects\Project-Fluid\Build\ToolchainSequence.ps1 -Check       # source tree + 142-char headers only
+bash Projects/Project-Fluid/Build/ToolchainSequence.sh --port 8765               # Linux/macOS (python3 http.server)
+```
+- Needs Chrome/Edge 113+, Firefox 141+ or Safari 26; on Windows the GPU is reached through D3D12 (check `chrome://gpu` → WebGPU)
+- Query: `resolution=32…160` (5 k → 1.4 M particles), `seconds=N` (0 = endless), `proof=1`, `fixed=1`, `perkernel=1`, `scale=0.25…1`, `mode=0…3`
+- Exit status in `window.ProjectFluidExit` and `#status`: 0 proofs passed, 2 a proof failed, 1 refusal (no WebGPU)
+- Survey + plan: `References/FluidPhaseF1-RecentSurveyAndWebGpuPlan.md` (2023–2026 sources); background: `FluidPhaseF0-SurveyAndPlan.md`
+
 ### Linux CMake (IDE integration / non-Windows only)
 ```bash
 cmake -B build && cmake --build build --config Release
@@ -245,6 +257,12 @@ Frontier/
 │   │   └── Source/
 │   │       ├── GameExecution.cpp   ← main loop: Solver.Advance(Δτ) → Solver.QueryPoses(); free-fall + no-tunnel proof
 │   │       └── DropSceneStructure.h/.cpp
+│   ├── Project-Fluid/              ← WebGPU fluid testbed (browser page, no C++): MLS-MPM dam-break + screen-space surface
+│   │   ├── Build/ToolchainSequence.ps1/.sh   ← static HTTP server (the browser is the toolchain); -Check validates headers
+│   │   └── Source/
+│   │       ├── index.html, GameExecution.js  ← 60 Hz tick accumulator → LiquidSolver.Advance → Present → proofs (exit 0/2/1)
+│   │       ├── LiquidSolver.js, SurfaceProjection.js, DamBreakStructure.js, TimingMetrics.js
+│   │       └── Shaders/ParticleSolver.wgsl, SurfaceProjection.wgsl
 │   └── Project-F20/                ← Racing game (same Content/ layout)
 │
 ├── Scripts/                        ← Utility scripts — invoked by build scripts as needed

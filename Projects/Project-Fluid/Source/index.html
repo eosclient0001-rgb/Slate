@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<!--
+  Frontier/Projects/Project-Fluid/Source/index.html — Project-Fluid page shell (canvas + controls; all logic in GameExecution.js)
+  Serve the Source/ directory over HTTP (ES modules and fetch() do not load from file://): Build/ToolchainSequence.ps1 / .sh
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Project-Fluid — MLS-MPM dam-break (WebGPU)</title>
+<style>
+    :root { color-scheme: dark; }
+    html, body { margin: 0; height: 100%; background: #101214; color: #d8dce0; font: 13px/1.45 "Segoe UI", system-ui, sans-serif; }
+    body { display: grid; grid-template-columns: 1fr 360px; grid-template-rows: 100%; }
+    #canvas { width: 100%; height: 100%; display: block; touch-action: none; background: #000; }
+    aside { padding: 12px 14px; overflow: auto; border-left: 1px solid #262a2e; background: #14171a; }
+    h1 { font-size: 15px; margin: 0 0 6px; }
+    h2 { font-size: 12px; margin: 14px 0 4px; color: #9aa4ae; text-transform: uppercase; letter-spacing: 0.06em; }
+    pre { margin: 0; white-space: pre-wrap; font: 12px/1.4 Consolas, "Cascadia Mono", monospace; }
+    label { display: block; margin: 6px 0 2px; color: #b6bec6; }
+    input[type=range] { width: 100%; }
+    select, input[type=number] { width: 100%; box-sizing: border-box; background: #1c2024; color: #e6eaee; border: 1px solid #30363c; padding: 4px 6px; }
+    button { margin: 8px 6px 0 0; padding: 5px 12px; background: #24507a; color: #fff; border: 0; border-radius: 3px; cursor: pointer; }
+    button.secondary { background: #2b3138; }
+    #status { padding: 8px; border-radius: 3px; background: #1a1e22; }
+    #status.pass { background: #163c22; }
+    #status.fail { background: #4a1c1c; }
+    .hint { color: #7f8890; }
+</style>
+</head>
+<body>
+<canvas id="canvas"></canvas>
+<aside>
+    <h1>Project-Fluid · dam-break</h1>
+    <div class="hint">MLS-MPM water in WebGPU, narrow-range screen-space surface. Drag to orbit, wheel to zoom.</div>
+
+    <h2>Status</h2>
+    <pre id="status">starting…</pre>
+
+    <h2>Scene</h2>
+    <pre id="particles"></pre>
+    <label for="resolution">Resolution <span id="resolutionLabel"></span></label>
+    <input id="resolution" type="range" min="32" max="160" step="8" value="64">
+    <label for="stiffness">Stiffness κ [Pa]</label>
+    <input id="stiffness" type="number" min="500" max="100000" step="500" value="10000">
+    <label for="substeps">Sub-steps per tick</label>
+    <select id="substeps">
+        <option value="auto">auto (Courant 0.6)</option>
+        <option>1</option><option>2</option><option>3</option><option>4</option><option>6</option><option>8</option>
+    </select>
+    <button id="restart">Restart</button>
+    <button id="pause" class="secondary">Pause</button>
+
+    <h2>Rendering</h2>
+    <label for="mode">View</label>
+    <select id="mode">
+        <option value="0">water (narrow-range smooth)</option>
+        <option value="1">particles (speed)</option>
+        <option value="2">smoothed distance</option>
+        <option value="3">thickness</option>
+    </select>
+    <label for="scale">Offscreen scale</label>
+    <select id="scale">
+        <option value="0.25">0.25 (¼ width — low end)</option>
+        <option value="0.5" selected>0.5 (GTX setting)</option>
+        <option value="0.75">0.75</option>
+        <option value="1">1.0 (full resolution — RTX)</option>
+    </select>
+
+    <h2>Telemetry</h2>
+    <pre id="telemetry">—</pre>
+    <button id="csv" class="secondary">Download CSV</button>
+
+    <h2>Proofs</h2>
+    <pre id="proofs">—</pre>
+    <div class="hint" style="margin-top:10px">
+        Proof run: <code>?seconds=8&amp;proof=1&amp;fixed=1</code> — ends with PASS/FAIL and a trace hash. Add
+        <code>&amp;perkernel=1</code> for per-kernel GPU timings, <code>&amp;resolution=96</code> for ~280 k particles.
+    </div>
+</aside>
+<script type="module" src="./GameExecution.js"></script>
+</body>
+</html>

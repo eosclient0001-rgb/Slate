@@ -1,5 +1,10 @@
 # Fluid phase F0 — survey of real-time fluid simulation + rendering, and the WebGPU experiment plan
 
+> **Superseded in part (2026-09-05, same day):** §5–§6 (tiers and the experiment plan) are replaced by
+> `FluidPhaseF1-RecentSurveyAndWebGpuPlan.md`, which uses 2023–2026 sources only, covers the adaptive flow-map and
+> phase-field papers (Cirrus, Adaptive PF-FLIP, Leapfrog Flow Maps), VBD/AVBD, and records the decision that the
+> prototype is **WebGPU only, no C++** (`Projects/Project-Fluid`). §1–§4 remain as background on the classic methods.
+
 Branch `arena/01a071a3-slate`, 2026-09-05. Written before any fluid code exists, so that the WebGPU experiments test the
 right candidates. Target: **AAA look, real time on a GTX-class card, scaling up on RTX**. Jolt stays the rigid-body
 authority; fluid/cloth/smoke/fire are separate solvers (Jolt has no fluid — see §1).
