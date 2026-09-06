@@ -26,8 +26,8 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-Required=(index.html GameExecution.js SwellSolver.js HorizonProjection.js OceanStructure.js TimingMetrics.js
-          Shaders/SeaStructure.wgsl Shaders/SwellSolver.wgsl Shaders/FoamSolver.wgsl Shaders/HorizonProjection.wgsl)
+Required=(index.html GameExecution.js SwellSolver.js ShoalSolver.js HorizonProjection.js OceanStructure.js TimingMetrics.js
+          Shaders/SeaStructure.wgsl Shaders/SwellSolver.wgsl Shaders/FoamSolver.wgsl Shaders/ShoalSolver.wgsl Shaders/HorizonProjection.wgsl)
 for Relative in "${Required[@]}"; do
     if [[ ! -f "$SourceRoot/$Relative" ]]; then
         echo "Project-Ocean: missing $Relative" >&2

@@ -15,12 +15,15 @@
 //    Units: metres, seconds, radians; +Z up; wind angle measured from +X toward +Y; waves travel WITH the wind.
 
 export const Tiers = Object.freeze({
-    //      spectral bands                                foam window (persistent)      vertex grid
-    gtx: { Bands: 3, Size: 256, Spacing: 0.5,   Ratio: 4, FoamSize: 512,  FoamSpacing: 1.0, Grid: 512,  Cell: 0.5  },   // 8 / 2 / 0.5 m
-    rtx: { Bands: 4, Size: 512, Spacing: 0.125, Ratio: 4, FoamSize: 1024, FoamSpacing: 0.5, Grid: 1024, Cell: 0.25 },   // 8 / 2 / 0.5 / 0.125 m
+    //      spectral bands                                foam window (persistent)      vertex grid              SWE patch
+    gtx: { Bands: 3, Size: 256, Spacing: 0.5,   Ratio: 4, FoamSize: 512,  FoamSpacing: 1.0, Grid: 512,  Cell: 0.5,  ShoalSize: 256, ShoalCell: 1.0 },   // 8 / 2 / 0.5 m
+    rtx: { Bands: 4, Size: 512, Spacing: 0.125, Ratio: 4, FoamSize: 1024, FoamSpacing: 0.5, Grid: 1024, Cell: 0.25, ShoalSize: 512, ShoalCell: 0.5 },   // 8 / 2 / 0.5 / 0.125 m
 });
 
-export const Scenes = Object.freeze({ Sea: "sea", Mode: "mode" });    // mode = one deterministic wave for the dispersion proof
+// sea: open water, spectral only · mode: one deterministic wave (dispersion proof) · open: sea + SWE patch over a flat floor
+// (wakes, tier-0/2 blend) · shore: sea + beach (shoaling, bores, run-up, drain-back) · runup: closed basin, solitary wave
+// on a plane beach (Synolakis benchmark; no spectral sea)
+export const Scenes = Object.freeze({ Sea: "sea", Mode: "mode", Open: "open", Shore: "shore", RunUp: "runup" });
 
 export const DefaultSea = Object.freeze({
     Tier:        "gtx",
@@ -42,6 +45,33 @@ export const DefaultSea = Object.freeze({
     Scene:       Scenes.Sea,
     Wavelength:  32.0,      // [m]    mode scene: the single wavelength (snapped to band 0's grid)
     Amplitude:   0.4,       // [m]    mode scene: amplitude A (steepness ak = 2πA/λ ≈ 0.08 — no breaking)
+    // ---- tier 2: shoal patch (shore / open / runup scenes)
+    ShoalSize:   null,      // [-]    cells per side (null → tier: GTX 256, RTX 512)
+    ShoalCell:   null,      // [m]    cell size (null → tier: GTX 1 m, RTX 0.5 m)
+    Slope:       0.05,      // [-]    beach slope tan β (1:20)
+    ShoalDepth:  20.0,      // [m]    offshore plain depth (the patch never sees deeper water)
+    Berm:        3.0,       // [m]    beach crest height
+    BarHeight:   1.5,       // [m]    longshore bar height (shore scene)
+    BarDistance: 80.0,      // [m]    bar crest seaward of the shoreline
+    BarWidth:    25.0,      // [m]    bar Gaussian width
+    CuspAmplitude: 0.4,     // [m]    beach cusps
+    CuspWavelength: 35.0,   // [m]
+    ShoreDistance: 120.0,   // [m]    still-water shoreline ahead of the origin, along the wind (waves run onto the beach)
+    RunUpDepth:  4.0,       // [m]    run-up scene: still depth d (the benchmark scales with Δx / d: GTX 0.25, RTX 0.125)
+    Manning:     0.02,      // [s/m^⅓] bed friction (sand)
+    Sponge:      12.0,      // [-]    relaxation rim width in cells (0 = closed basin)
+    Relaxation:  6.0,       // [1/s]  peak relaxation rate at the patch edge
+    Dry:         0.005,     // [m]    wet/dry threshold
+    SpeedCap:    15.0,      // [m/s]
+    ShallowRatio: 8.0,      // [-]    handover depth = peak λ / this: shallower water belongs to the patch, deeper to the bands
+    ForcingCap:  3.0,       // [-]    cap on the depth-averaged velocity factor √tanh(kd) / (kd) of the forcing
+    Hull:        true,      // [-]    open/shore scenes: a hull (moving surface pressure) ahead of the camera
+    HullRadius:  4.0,       // [m]    hull Gaussian radius
+    HullHead:    1.2,       // [m]    hull pressure head (metres of water displaced under it)
+    HullLead:    18.0,      // [m]    hull distance ahead of the camera
+    WaveRatio:   0.0185,    // [-]    run-up scene: H / d (Synolakis' laboratory case; breaking limit 0.818 cot β^{−10/9} = 0.030)
+    CrestRatio:  35.0,      // [-]    run-up scene: initial crest distance seaward of the shoreline, in depths (toe is at 19.85 d)
+    RunUpSlope:  1.0 / 19.85, // [-]  run-up scene: Synolakis' beach
     Fade:        1.0,       // [-]    a band fades out where its texel subtends Fade pixels
     MaxHeight:   30.0,      // [m]    vertical extent used for node culling
     Height:      6.0,       // [m]    camera height above the mean surface
@@ -73,6 +103,26 @@ export function DescribeSea(overrides = {})
     }
     const windAngle = p.Angle * Math.PI / 180.0;
     const mode = p.Scene === Scenes.Mode;
+    const runUp = p.Scene === Scenes.RunUp;
+    const shoalScene = [Scenes.Open, Scenes.Shore, Scenes.RunUp].includes(p.Scene) ? p.Scene : null;
+    // Waves travel with the wind, onto the beach. The run-up benchmark runs along +x so the basin's side walls are parallel
+    // to the wave (a 1-D problem in 2-D: any transverse flow is an error) and its shoreline sits 12 % from the landward
+    // wall of the patch: 88 % of the patch is sea, so the crest starts ≈ 21 depths from the seaward wall (tail 2.5 % of H).
+    const normal = runUp ? [1.0, 0.0] : [Math.cos(windAngle), Math.sin(windAngle)];
+    const shoalSize = PowerOfTwo(p.ShoalSize ?? tier.ShoalSize, 64, 1024), shoalCell = p.ShoalCell ?? tier.ShoalCell;
+    const shoalDepth = runUp ? p.RunUpDepth : p.ShoalDepth;
+    const shoreDistance = runUp ? 0.38 * shoalSize * shoalCell : p.ShoreDistance;
+    const shoal = Object.freeze({
+        Scene: shoalScene ?? Scenes.Sea,
+        Size: shoalSize, Cell: shoalCell,
+        Shore: [normal[0] * shoreDistance, normal[1] * shoreDistance], Normal: normal,
+        Slope: runUp ? p.RunUpSlope : p.Slope, Depth: shoalDepth, Berm: p.Berm,
+        BarHeight: p.BarHeight, BarDistance: p.BarDistance, BarWidth: p.BarWidth, CuspAmplitude: p.CuspAmplitude, CuspWavelength: p.CuspWavelength,
+        WaveHeight: runUp ? p.WaveRatio * shoalDepth : 0.0, WaveDepth: shoalDepth, CrestDistance: p.CrestRatio * shoalDepth,
+        Manning: runUp ? 0.0 : p.Manning, Sponge: runUp ? 0.0 : p.Sponge, Relaxation: runUp ? 0.0 : p.Relaxation,
+        Dry: p.Dry, SpeedCap: p.SpeedCap, ShallowRatio: p.ShallowRatio, ForcingCap: p.ForcingCap,
+        Hull: p.Hull && !runUp, HullRadius: p.HullRadius, HullHead: p.HullHead, HullLead: p.HullLead,
+    });
     // Mode scene: the requested wavelength snaps to band 0's wavenumber grid so the analytic phase speed is exact.
     const modeIndex      = Math.max(1, Math.round(bands[0].Length / p.Wavelength));
     const modeWavelength = bands[0].Length / modeIndex;
@@ -87,7 +137,9 @@ export function DescribeSea(overrides = {})
         Wind: p.Wind, FetchMetres: p.Fetch * 1000.0, Depth: p.Depth, Swell: Clamp(p.Swell, 0.0, 1.0),
         WindAngle: windAngle, Choppiness: p.Choppiness, Gamma: p.Gamma, Gravity: p.Gravity, Seed: p.Seed,
         Foam: !!p.Foam, JThreshold: p.JThreshold, AzGamma: p.AzGamma, FoamDecay: p.FoamDecay, FoamRate: p.FoamRate,
-        Scene: mode ? Scenes.Mode : Scenes.Sea,
+        Scene: mode ? Scenes.Mode : (shoalScene ?? Scenes.Sea),
+        Shoal: shoal,
+        Spectral: !runUp,                                                        // the run-up basin has no spectral sea
         Mode: Object.freeze({ Index: modeIndex, Wavelength: modeWavelength, K: modeK, Omega: modeOmega, Amplitude: p.Amplitude,
                               PhaseSpeed: modeOmega / modeK, Steepness: modeK * p.Amplitude }),
         Fade: p.Fade, MaxHeight: p.MaxHeight,

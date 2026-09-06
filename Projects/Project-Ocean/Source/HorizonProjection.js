@@ -52,6 +52,8 @@ export class HorizonProjection
                 { binding: 5, visibility: V | F, sampler: { type: "filtering" } },
                 { binding: 6, visibility: F, texture: { sampleType: "float" } },
                 { binding: 7, visibility: F, sampler: { type: "filtering" } },
+                { binding: 8, visibility: V | F, buffer: { type: "uniform" } },
+                { binding: 9, visibility: V | F, texture: { sampleType: "unfilterable-float" } },
             ],
         });
         const layout = device.createPipelineLayout({ bindGroupLayouts: [this.Layout] });
@@ -73,26 +75,16 @@ export class HorizonProjection
         this.Groups = null;
     }
 
-    // Binds the solver's textures (two groups: the foam window ping-pongs).
-    AttachSea(sea, solver, grid, cell)
+    // Binds the solver's textures (two groups: the foam window ping-pongs; the patch view is refreshed per frame).
+    AttachSea(sea, solver, grid, cell, shoal = null)
     {
         this.Sea = sea;
         this.Solver = solver;
+        this.Shoal = shoal;
         this.Grid = grid;
         this.Cell = cell;
-        this.Groups = [0, 1].map(i => this.Device.createBindGroup({
-            label: `HorizonGroup${i}`, layout: this.Layout,
-            entries: [
-                { binding: 0, resource: { buffer: solver.Constants } },
-                { binding: 1, resource: { buffer: this.ViewConstants } },
-                { binding: 2, resource: solver.DisplacementView },
-                { binding: 3, resource: solver.DerivativeView },
-                { binding: 4, resource: solver.MotionView },
-                { binding: 5, resource: solver.Wrap },
-                { binding: 6, resource: solver.FoamViews[i] },
-                { binding: 7, resource: solver.Clamp },
-            ],
-        }));
+        this.PatchView = null;
+        this.BuildGroups();
         // Triangle strips, one per grid row, joined by primitive restart.
         const columns = grid + 1;
         const indices = new Uint32Array(grid * (2 * columns + 1));
@@ -113,6 +105,28 @@ export class HorizonProjection
         this.Camera.Height = sea.Camera.Height;
         this.Camera.Pitch  = sea.Camera.Pitch;
         this.Camera.Yaw    = sea.Camera.Yaw;
+    }
+
+    BuildGroups()
+    {
+        const solver = this.Solver;
+        const constants = this.Shoal ? this.Shoal.Constants : solver.ShoalStandIn.Constants;
+        this.PatchView = this.Shoal ? this.Shoal.View : solver.ShoalStandIn.View;
+        this.Groups = [0, 1].map(i => this.Device.createBindGroup({
+            label: `HorizonGroup${i}`, layout: this.Layout,
+            entries: [
+                { binding: 0, resource: { buffer: solver.Constants } },
+                { binding: 1, resource: { buffer: this.ViewConstants } },
+                { binding: 2, resource: solver.DisplacementView },
+                { binding: 3, resource: solver.DerivativeView },
+                { binding: 4, resource: solver.MotionView },
+                { binding: 5, resource: solver.Wrap },
+                { binding: 6, resource: solver.FoamViews[i] },
+                { binding: 7, resource: solver.Clamp },
+                { binding: 8, resource: { buffer: constants } },
+                { binding: 9, resource: this.PatchView },
+            ],
+        }));
     }
 
     //--------------------------------------------------------------------------------------------------------------------
@@ -221,6 +235,10 @@ export class HorizonProjection
             depthStencilAttachment: { view: this.DepthView, depthClearValue: 0.0, depthLoadOp: "clear", depthStoreOp: "discard" },
             timestampWrites: metrics.Slot("Render"),
         });
+        if (this.Shoal && this.PatchView !== this.Shoal.View)
+        {
+            this.BuildGroups();
+        }
         const group = this.Groups[this.Solver.FoamIndex];
         pass.setBindGroup(0, group);
         pass.setPipeline(this.SkyRaster);

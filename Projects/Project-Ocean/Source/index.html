@@ -6,7 +6,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>Project-Ocean — cascaded FFT sea + foam (WebGPU)</title>
+<title>Project-Ocean — cascaded FFT sea + foam + shoal (WebGPU)</title>
 <style>
     :root { color-scheme: dark; }
     html, body { margin: 0; height: 100%; background: #101214; color: #d8dce0; font: 13px/1.45 "Segoe UI", system-ui, sans-serif; }
@@ -32,7 +32,7 @@
 <canvas id="canvas"></canvas>
 <aside>
     <h1>Project-Ocean · open sea</h1>
-    <div class="hint">Cascaded-FFT ocean with persistent whitecap foam, in WebGPU. Drag to look, wheel for height, W/A/S/D or arrows to sail.</div>
+    <div class="hint">Cascaded-FFT ocean, persistent whitecap foam and a shallow-water shoal patch, in WebGPU. Drag to look, wheel for height, W/A/S/D or arrows to sail.</div>
 
     <h2>Status</h2>
     <pre id="status">starting…</pre>
@@ -52,6 +52,9 @@
             <select id="scene">
                 <option value="sea">wind sea (JONSWAP/TMA)</option>
                 <option value="mode">single wave (dispersion proof)</option>
+                <option value="open">sea + shoal patch, flat floor (tier 2)</option>
+                <option value="shore">sea + beach: shoaling, bores, run-up (tier 2)</option>
+                <option value="runup">solitary-wave run-up benchmark (tier 2)</option>
             </select>
         </div>
     </div>
@@ -72,6 +75,7 @@
         </div>
     </div>
     <label><input id="foam" type="checkbox" checked> Foam (tier 1 — Jacobian fold or crest acceleration ≤ −0.39 g)</label>
+    <pre id="shoal" class="hint"></pre>
     <button id="restart">Restart</button>
     <button id="pause" class="secondary">Pause</button>
 
@@ -83,6 +87,7 @@
         <option value="2">Jacobian (red = folding, blue = foam threshold)</option>
         <option value="3">band weights per vertex</option>
         <option value="4">surface speed</option>
+        <option value="5">shoal patch: depth · sand · bores (red) · rim (green)</option>
     </select>
 
     <h2>Telemetry</h2>
@@ -92,9 +97,11 @@
     <h2>Proofs</h2>
     <pre id="proofs">—</pre>
     <div class="hint" style="margin-top:10px">
-        Proof run: <code>?seconds=6&amp;proof=1&amp;fixed=1</code> (spectrum energy, Parseval, finite, foam) and
-        <code>?scene=mode&amp;seconds=4&amp;proof=1&amp;fixed=1</code> (dispersion ±1 %). Add <code>&amp;perkernel=1</code> for per-kernel GPU
-        timings, <code>&amp;tier=rtx</code> for 4 × 512², <code>&amp;wind=18</code> for a gale, <code>&amp;foam=0</code> for tier 0 only.
+        Proof run: <code>?seconds=6&amp;proof=1&amp;fixed=1</code> (spectrum energy, Parseval, finite, foam),
+        <code>?scene=mode&amp;seconds=4&amp;proof=1&amp;fixed=1</code> (dispersion ±1 %),
+        <code>?scene=runup&amp;seconds=60&amp;proof=1&amp;fixed=1</code> (tier 2: volume 1e-4, Synolakis run-up ±15 %),
+        <code>?scene=shore&amp;wind=14&amp;seconds=20&amp;proof=1&amp;fixed=1</code> (bores → foam). Add <code>&amp;perkernel=1</code> for per-kernel GPU
+        timings, <code>&amp;tier=rtx</code> for 4 × 512² + a 512² patch, <code>&amp;wind=18</code> for a gale, <code>&amp;foam=0</code> for tier 0 only.
     </div>
 </aside>
 <script type="module" src="./GameExecution.js"></script>

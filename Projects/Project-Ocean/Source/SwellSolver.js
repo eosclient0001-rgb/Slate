@@ -50,6 +50,7 @@ export class SwellSolver
         this.Options = { Gaussian: false, FoamSize: 512, FoamSpacing: 1.0, Blur: 0.35, ...options };
         this.Time    = 0.0;      // [s] simulated seconds
         this.Tick    = 0;
+        this.Shoal   = null;     // tier 2, attached later
         const N = sea.Size, B = sea.BandCount;
         this.Size = N; this.Bands = B;
 
@@ -160,6 +161,8 @@ export class SwellSolver
                 { binding: 5, visibility: C, texture: { sampleType: "float" } },
                 { binding: 6, visibility: C, sampler: { type: "filtering" } },
                 { binding: 7, visibility: C, storageTexture: { access: "write-only", format: "rgba16float" } },
+                { binding: 10, visibility: C, buffer: { type: "uniform" } },
+                { binding: 11, visibility: C, texture: { sampleType: "unfilterable-float" } },
             ],
         });
         this.FoamMeasureLayout = device.createBindGroupLayout({
@@ -175,19 +178,13 @@ export class SwellSolver
         this.FoamMeasure = device.createComputePipeline({ label: "MeasureFoam", layout: device.createPipelineLayout({ bindGroupLayouts: [this.FoamMeasureLayout] }),
                                                           compute: { module: foamShader, entryPoint: "MeasureFoam" } });
         this.FoamPartials = Make("FoamPartials", this.FoamSize * 32, S.STORAGE | S.COPY_SRC);
-        this.FoamGroups = [0, 1].map(i => device.createBindGroup({
-            label: `FoamGroup${i}`, layout: this.FoamLayout,
-            entries: [
-                { binding: 0, resource: { buffer: this.Constants } },
-                { binding: 1, resource: this.DisplacementView },
-                { binding: 2, resource: this.DerivativeView },
-                { binding: 3, resource: this.MotionView },
-                { binding: 4, resource: this.Wrap },
-                { binding: 5, resource: this.FoamViews[i] },          // previous = i, next = 1 − i
-                { binding: 6, resource: this.Clamp },
-                { binding: 7, resource: this.FoamViews[1 - i] },
-            ],
-        }));
+        // Tier-2 stand-ins until AttachShoal: a Shoal uniform with scene 0 (every patch branch skips) and a 1×1 state texture.
+        this.ShoalStandIn = { Constants: Make("ShoalAbsent", 176, S.UNIFORM | S.COPY_DST),
+                              Texture: device.createTexture({ label: "ShoalAbsent", size: [1, 1], format: "rgba32float", usage: T.TEXTURE_BINDING }) };
+        this.ShoalStandIn.View = this.ShoalStandIn.Texture.createView();
+        this.ShoalConstants = this.ShoalStandIn.Constants;
+        this.ShoalView = this.ShoalStandIn.View;
+        this.BuildFoamGroups();
         this.FoamMeasureGroups = [0, 1].map(i => device.createBindGroup({
             label: `FoamMeasureGroup${i}`, layout: this.FoamMeasureLayout,
             entries: [
@@ -205,15 +202,18 @@ export class SwellSolver
         this.ProofRecorded = false;
         this.LastProof    = null;
 
-        this.Spectrum = this.PrescribedVariance();
+        this.Spectrum = sea.Spectral ? this.PrescribedVariance() : { Bands: new Array(B).fill(0.0), Total: 0.0, Slope: new Array(B).fill(0.0), LambdaMin: sea.Bands.map(b => 2.0 * Math.PI / b.MaxK) };
         this.WriteSea(0.0, 1.0 / 60.0);
-        const encoder = device.createCommandEncoder({ label: "SeaInit" });
-        const pass = encoder.beginComputePass({ label: "SpectrumInit" });
-        pass.setPipeline(this.Kernels.SpectrumInit);
-        pass.setBindGroup(0, this.Group);
-        pass.dispatchWorkgroups(Math.ceil(N / Tile), Math.ceil(N / Tile), B);
-        pass.end();
-        device.queue.submit([encoder.finish()]);
+        if (sea.Spectral)
+        {
+            const encoder = device.createCommandEncoder({ label: "SeaInit" });
+            const pass = encoder.beginComputePass({ label: "SpectrumInit" });
+            pass.setPipeline(this.Kernels.SpectrumInit);
+            pass.setBindGroup(0, this.Group);
+            pass.dispatchWorkgroups(Math.ceil(N / Tile), Math.ceil(N / Tile), B);
+            pass.end();
+            device.queue.submit([encoder.finish()]);
+        }
     }
 
     //--------------------------------------------------------------------------------------------------------------------
@@ -251,7 +251,8 @@ export class SwellSolver
     //                                                      ADVANCE
     //--------------------------------------------------------------------------------------------------------------------
 
-    Advance(encoder, dt, metrics)
+    // One tick: bands → (tier-2 shoal, if given) → foam. The shoal runs between the two because the foam reads its bores.
+    Advance(encoder, dt, metrics, shoal = null)
     {
         const N = this.Size, B = this.Bands;
         this.Time += dt;
@@ -261,6 +262,13 @@ export class SwellSolver
         this.FoamOrigin = [Math.round((this.FoamFocus[0] - half) / this.FoamSpacing) * this.FoamSpacing,
                            Math.round((this.FoamFocus[1] - half) / this.FoamSpacing) * this.FoamSpacing];
         this.WriteSea(this.Time, dt);
+        if (!this.Sea.Spectral)
+        {
+            // No spectral sea in this scene (run-up basin): the band textures stay at their all-zero initial state.
+            shoal?.Advance(encoder, dt, metrics);
+            this.AdvanceFoam(encoder, metrics);
+            return;
+        }
 
         const perKernel = metrics.PerKernel;
         const Dispatch = (name, x, y, z, label) =>
@@ -276,22 +284,60 @@ export class SwellSolver
         Dispatch("FftRows", N, Layers * B, 1, perKernel ? "FftRows" : "Fft");
         Dispatch("FftColumns", N, Layers * B, 1, perKernel ? "FftColumns" : "Fft");
         Dispatch("Compose", tiles, tiles, B, perKernel ? "Compose" : "Spectrum");
+        shoal?.Advance(encoder, dt, metrics);
+        this.AdvanceFoam(encoder, metrics);
+    }
 
-        if (this.FoamEnabled)
+    AdvanceFoam(encoder, metrics)
+    {
+        if (!this.FoamEnabled)
         {
-            const pass = encoder.beginComputePass({ label: "FoamAdvance", timestampWrites: metrics.Slot("Foam") });
-            pass.setPipeline(this.FoamAdvance);
-            pass.setBindGroup(0, this.FoamGroups[this.FoamIndex]);
-            const groups = Math.ceil(this.FoamSize / Tile);
-            pass.dispatchWorkgroups(groups, groups, 1);
-            pass.end();
-            this.FoamIndex = 1 - this.FoamIndex;
+            return;
         }
+        if (this.Shoal && this.ShoalView !== this.Shoal.View)
+        {
+            this.ShoalView = this.Shoal.View;
+            this.BuildFoamGroups();
+        }
+        const pass = encoder.beginComputePass({ label: "FoamAdvance", timestampWrites: metrics.Slot("Foam") });
+        pass.setPipeline(this.FoamAdvance);
+        pass.setBindGroup(0, this.FoamGroups[this.FoamIndex]);
+        const groups = Math.ceil(this.FoamSize / Tile);
+        pass.dispatchWorkgroups(groups, groups, 1);
+        pass.end();
+        this.FoamIndex = 1 - this.FoamIndex;
     }
 
     get FoamView()
     {
         return this.FoamViews[this.FoamIndex];
+    }
+
+    BuildFoamGroups()
+    {
+        this.FoamGroups = [0, 1].map(i => this.Device.createBindGroup({
+            label: `FoamGroup${i}`, layout: this.FoamLayout,
+            entries: [
+                { binding: 0, resource: { buffer: this.Constants } },
+                { binding: 1, resource: this.DisplacementView },
+                { binding: 2, resource: this.DerivativeView },
+                { binding: 3, resource: this.MotionView },
+                { binding: 4, resource: this.Wrap },
+                { binding: 5, resource: this.FoamViews[i] },          // previous = i, next = 1 − i
+                { binding: 6, resource: this.Clamp },
+                { binding: 7, resource: this.FoamViews[1 - i] },
+                { binding: 10, resource: { buffer: this.ShoalConstants } },
+                { binding: 11, resource: this.ShoalView },
+            ],
+        }));
+    }
+
+    // Tier 2 present: the foam reads the patch's bores. Called once after ShoalSolver.Create (its state ping-pongs, so the
+    // group is rebuilt per tick with the current view — cheap, two bind groups).
+    AttachShoal(shoal)
+    {
+        this.Shoal = shoal;
+        this.ShoalConstants = shoal.Constants;
     }
 
     //--------------------------------------------------------------------------------------------------------------------
@@ -451,7 +497,8 @@ export class SwellSolver
     Destroy()
     {
         for (const b of [this.Constants, this.Initial, this.Spectral, this.Pong, this.Partials, this.FoamPartials, this.Staging]) { b.destroy(); }
-        for (const t of [this.Displacement, this.Derivative, this.Motion, ...this.FoamTextures]) { t.destroy(); }
+        for (const t of [this.Displacement, this.Derivative, this.Motion, ...this.FoamTextures, this.ShoalStandIn.Texture]) { t.destroy(); }
+        this.ShoalStandIn.Constants.destroy();
     }
 }
 

@@ -11,8 +11,10 @@
 //        3. re-samples last tick's foam at the same world position (the window may have shifted), spreads it with a tent
 //           blur, lets it decay with time constant FoamDecay and injects FoamRate · Δτ · strength while the mask fires.
 //    Foam lives in undisplaced (grid) space, exactly where HorizonProjection looks it up, so it rides the orbital motion of the
-//    surface for free — no advection pass. Channels: R foam energy 0…1 · G acceleration mask (0/1) · B J · A −a_z / g.
-//    Bindings 0–7 serve FoamAdvance, bindings 0, 8, 9 serve MeasureFoam (a different bind group, no read/write overlap).
+//    surface for free — no advection pass (inside the tier-2 patch the foam is carried by the SWE current instead).
+//    Channels: R foam energy 0…1 · G acceleration mask (0/1) · B J · A −a_z / g.
+//    Bindings 0–7, 10, 11 serve FoamAdvance, bindings 0, 8, 9 serve MeasureFoam (a different bind group, no read/write overlap).
+//    Tier 2 (bores → foam) reads the shoal patch state; without a patch its scene code is 0 and the branch is skipped.
 
 const Pi   = 3.14159265358979;
 const Tile = 16u;
@@ -30,6 +32,8 @@ const WG   = 256u;
 @group(0) @binding(7) var Next:         texture_storage_2d<rgba16float, write>;
 @group(0) @binding(8) var Current:      texture_2d<f32>;         // MeasureFoam input
 @group(0) @binding(9) var<storage, read_write> Partials: array<vec4f>;
+@group(0) @binding(10) var<uniform> P: Shoal;                    // tier 2 patch (scene 0 = absent)
+@group(0) @binding(11) var Patch: texture_2d<f32>;               // SWE state (h, u, v, bore)
 
 @compute @workgroup_size(Tile, Tile)
 fn FoamAdvance(@builtin(global_invocation_id) id: vec3u)
@@ -57,10 +61,39 @@ fn FoamAdvance(@builtin(global_invocation_id) id: vec3u)
     }
     let j = (1.0 + dxx) * (1.0 + dyy) - dxy * dxy;
     let fall = -az / U.Wave.x;                                                    // [g] downward acceleration of the surface
-    let strength = max(0.0, (U.Foam.x - j) / U.Foam.x) + max(0.0, (fall - U.Foam.y) / U.Foam.y);
-    let mask = select(0.0, 1.0, fall >= U.Foam.y);
+    var strength = max(0.0, (U.Foam.x - j) / U.Foam.x) + max(0.0, (fall - U.Foam.y) / U.Foam.y);
+    var mask = select(0.0, 1.0, fall >= U.Foam.y);
+    // Tier 2: inside the shoal patch, bores (breaking in the shallow-water sense) inject foam; the spectral criteria fade
+    // out where the bands themselves fade (shallow water, land), so the foam follows whichever tier owns the surface.
+    let weight = PatchWeight(P, world);
+    if (weight > 0.0)
+    {
+        let cell = (world - P.Patch.xy) / P.Patch.z;
+        let state = textureLoad(Patch, vec2u(clamp(cell, vec2f(0.0), vec2f(P.Patch.w - 1.0))), 0);
+        let still = -Bed(P, world);
+        var spectral = 0.0;
+        for (var b = 0u; b < U.Grid.z; b++)
+        {
+            spectral = max(spectral, DepthWeight(P, b, still));
+        }
+        strength = strength * mix(1.0, spectral, weight) + weight * 3.0 * state.w;
+        mask = max(mask * mix(1.0, spectral, weight), select(0.0, 1.0, state.w > 0.1));
+        if (state.x <= P.Limits.x)
+        {
+            strength = 0.0;                                                       // dry sand keeps no foam
+        }
+    }
 
-    let previousUv = (world - U.Previous.xy) / extent;
+    // Inside the patch the foam rides the shallow-water current (semi-Lagrangian: read where the water came from); in
+    // the open sea the FFT surface is Eulerian and the foam stays with the texel as before.
+    var origin = world;
+    if (weight > 0.0)
+    {
+        let cell = (world - P.Patch.xy) / P.Patch.z;
+        let state = textureLoad(Patch, vec2u(clamp(cell, vec2f(0.0), vec2f(P.Patch.w - 1.0))), 0);
+        origin = world - weight * Handover(P, -Bed(P, world)) * vec2f(state.y, state.z) * U.Clock.y;
+    }
+    let previousUv = (origin - U.Previous.xy) / extent;
     let inside = select(0.0, 1.0, all(previousUv >= vec2f(0.0)) && all(previousUv <= vec2f(1.0)));
     let texel = 1.0 / f32(size);
     let centre = textureSampleLevel(Previous, Clamp, previousUv, 0.0).x;

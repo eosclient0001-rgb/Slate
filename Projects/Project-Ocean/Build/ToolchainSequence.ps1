@@ -8,6 +8,7 @@
 #     powershell -File Projects\Project-Ocean\Build\ToolchainSequence.ps1 -NoBrowser
 #     powershell -File Projects\Project-Ocean\Build\ToolchainSequence.ps1 -Proof            # opens the 6 s PASS/FAIL run
 #     powershell -File Projects\Project-Ocean\Build\ToolchainSequence.ps1 -Dispersion       # single-wave dispersion proof
+#     powershell -File Projects\Project-Ocean\Build\ToolchainSequence.ps1 -RunUp            # tier-2 solitary-wave run-up benchmark
 #     powershell -File Projects\Project-Ocean\Build\ToolchainSequence.ps1 -Query 'tier=rtx&perkernel=1'
 #
 #   Stop with Ctrl-C. -Check only validates the source tree (files present, WGSL headers 142 wide) and exits.
@@ -18,6 +19,7 @@ param(
     [switch] $NoBrowser,
     [switch] $Proof,
     [switch] $Dispersion,
+    [switch] $RunUp,
     [string] $Query     = '',
     [switch] $Check
 )
@@ -31,8 +33,8 @@ if (-not (Test-Path (Join-Path $SourceRoot 'index.html')))
 }
 
 # ---- source check -----------------------------------------------------------------------------------------------------
-$Required = @('index.html', 'GameExecution.js', 'SwellSolver.js', 'HorizonProjection.js', 'OceanStructure.js', 'TimingMetrics.js',
-              'Shaders\SeaStructure.wgsl', 'Shaders\SwellSolver.wgsl', 'Shaders\FoamSolver.wgsl', 'Shaders\HorizonProjection.wgsl')
+$Required = @('index.html', 'GameExecution.js', 'SwellSolver.js', 'ShoalSolver.js', 'HorizonProjection.js', 'OceanStructure.js', 'TimingMetrics.js',
+              'Shaders\SeaStructure.wgsl', 'Shaders\SwellSolver.wgsl', 'Shaders\FoamSolver.wgsl', 'Shaders\ShoalSolver.wgsl', 'Shaders\HorizonProjection.wgsl')
 $Missing = @($Required | Where-Object { -not (Test-Path (Join-Path $SourceRoot $_)) })
 if ($Missing.Count -gt 0)
 {
@@ -77,6 +79,7 @@ catch
 
 if ($Proof -and -not $Query) { $Query = 'seconds=6&proof=1&fixed=1&perkernel=1' }
 if ($Dispersion -and -not $Query) { $Query = 'scene=mode&seconds=4&proof=1&fixed=1' }
+if ($RunUp -and -not $Query) { $Query = 'scene=runup&seconds=60&proof=1&fixed=1&perkernel=1' }
 $Url = $Prefix
 if ($Query) { $Url = "$Prefix`?$Query" }
 Write-Host "Project-Ocean: serving $SourceRoot at $Url  (Ctrl-C to stop)" -ForegroundColor Cyan

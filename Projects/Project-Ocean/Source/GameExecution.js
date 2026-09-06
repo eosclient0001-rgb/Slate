@@ -19,12 +19,20 @@
 //
 //    Query string: ?tier=gtx|rtx&bands=3&size=256&wind=10&fetch=200&depth=200&swell=0.3&chop=1.2&angle=30&seed=7
 //                  &foam=1&jthreshold=0.6&azgamma=0.39&foamdecay=4&foamrate=2.5
-//                  &scene=sea|mode&wavelength=32&amplitude=0.4&gaussian=0&view=0&height=6&pitch=-6&yaw=…
-//                  &seconds=6&proof=1&fixed=1&perkernel=1&offscreen=1
+//                  &scene=sea|mode|open|shore|runup&wavelength=32&amplitude=0.4&gaussian=0
+//                  &shoalsize=256&shoalcell=1&slope=0.05&shoaldepth=20&runupdepth=4&waveratio=0.0185&sponge=12&manning=0.02&bar=1.5
+//                  &hull=1&head=1.2
+//                  &view=0…5&height=6&pitch=-6&yaw=…&seconds=6&proof=1&fixed=1&perkernel=1&offscreen=1&present=0
+//    Tier 2 (scene=open|shore|runup) adds the shallow-water patch (ShoalSolver.js) and its proofs:
+//        volume        run-up basin: Σ h Δx² drifts < 1e-4 relative (closed, exactly conserving flux form)
+//        run-up        run-up scene: max wet bed vs Synolakis R/d = 2.831 √cot β (H/d)^{5/4} within 15 %
+//        shoal-finite  no NaN/Inf, |u| under the cap, η bounded
+//        bores         shore scene at wind ≥ 12 m/s: the bore detector fires in the surf zone
 //    Exit status is written to #status and window.ProjectOceanExit (0 pass · 2 proof failed · 1 refusal — no WebGPU).
 
 import { DescribeSea, DefaultSea, Tiers, Scenes, BandWindow, PeakWavelength } from "./OceanStructure.js";
 import { SwellSolver } from "./SwellSolver.js";
+import { ShoalSolver, SynolakisRunUp } from "./ShoalSolver.js";
 import { HorizonProjection } from "./HorizonProjection.js";
 import { TimingMetrics } from "./TimingMetrics.js";
 
@@ -38,11 +46,11 @@ const ProofInterval = 30;            // [-]   ticks between proofs
 
 const Host = {
     Device: null, Context: null, Format: null,
-    Sea: null, Solver: null, Horizon: null, Metrics: null,
+    Sea: null, Solver: null, Shoal: null, Horizon: null, Metrics: null,
     Settings: null,
     Accumulator: 0.0, LastStamp: 0.0, Dropped: 0, Ticks: 0, Recipe: "",
     Running: true, Finished: false, Proofs: [], Failures: [], TraceHash: null, LastProofTick: 0, Gate: false,
-    ModeTrace: [], FoamFired: false, Keys: new Set(),
+    ModeTrace: [], FoamFired: false, BoresSeen: false, Keys: new Set(),
     Elements: {},
 };
 
@@ -67,7 +75,19 @@ function ReadSettings()
         AzGamma:    Number_("azgamma", DefaultSea.AzGamma),
         FoamDecay:  Number_("foamdecay", DefaultSea.FoamDecay),
         FoamRate:   Number_("foamrate", DefaultSea.FoamRate),
-        Scene:      q.get("scene") === "mode" ? Scenes.Mode : Scenes.Sea,
+        Scene:      Object.values(Scenes).includes(q.get("scene")) ? q.get("scene") : Scenes.Sea,
+        ShoalSize:  q.has("shoalsize") ? Math.round(Number_("shoalsize", 256)) : null,
+        ShoalCell:  q.has("shoalcell") ? Number_("shoalcell", 1.0) : null,
+        Slope:      Number_("slope", DefaultSea.Slope),
+        ShoalDepth: Number_("shoaldepth", DefaultSea.ShoalDepth),
+        RunUpDepth: Number_("runupdepth", DefaultSea.RunUpDepth),
+        WaveRatio:  Number_("waveratio", DefaultSea.WaveRatio),
+        Present:    q.get("present") !== "0",                      // 0 = simulate only (proof timing without the draw)
+        Sponge:     Number_("sponge", DefaultSea.Sponge),
+        Manning:    Number_("manning", DefaultSea.Manning),
+        BarHeight:  Number_("bar", DefaultSea.BarHeight),
+        Hull:       q.get("hull") !== "0",
+        HullHead: Number_("head", DefaultSea.HullHead),
         Wavelength: Number_("wavelength", DefaultSea.Wavelength),
         Amplitude:  Number_("amplitude", DefaultSea.Amplitude),
         Gaussian:   q.get("gaussian") === "1",
@@ -91,7 +111,7 @@ async function Start()
 {
     const E = Host.Elements;
     for (const id of ["canvas", "status", "telemetry", "proofs", "sea", "tier", "scene", "wind", "windLabel", "fetch", "fetchLabel", "depth", "depthLabel",
-                      "swell", "choppiness", "foam", "restart", "pause", "csv", "view"])
+                      "swell", "choppiness", "foam", "restart", "pause", "csv", "view", "shoal"])
     {
         E[id] = document.getElementById(id);
     }
@@ -155,29 +175,54 @@ async function Restart()
     s.Tier = E.tier.value; s.Scene = E.scene.value; s.Wind = parseFloat(E.wind.value); s.Fetch = parseFloat(E.fetch.value);
     s.Depth = parseFloat(E.depth.value); s.Swell = parseFloat(E.swell.value); s.Choppiness = parseFloat(E.choppiness.value); s.Foam = E.foam.checked;
     Host.Solver?.Destroy();
+    Host.Shoal?.Destroy();
+    Host.Shoal = null;
     const tier = Tiers[s.Tier];
     Host.Sea = DescribeSea({
         Tier: s.Tier, Bands: s.Bands ?? undefined, Size: s.Size ?? undefined,
         Wind: s.Wind, Fetch: s.Fetch, Depth: s.Depth, Swell: s.Swell, Choppiness: s.Choppiness, Angle: s.Angle, Seed: s.Seed,
         Foam: s.Foam, JThreshold: s.JThreshold, AzGamma: s.AzGamma, FoamDecay: s.FoamDecay, FoamRate: s.FoamRate,
         Scene: s.Scene, Wavelength: s.Wavelength, Amplitude: s.Amplitude,
+        ShoalSize: s.ShoalSize, ShoalCell: s.ShoalCell, Slope: s.Slope, ShoalDepth: s.ShoalDepth, RunUpDepth: s.RunUpDepth, WaveRatio: s.WaveRatio,
+        Sponge: s.Sponge, Manning: s.Manning, BarHeight: s.BarHeight, Hull: s.Hull, HullHead: s.HullHead,
         Height: s.Height, Pitch: s.Pitch, Yaw: s.Yaw,
     });
     Host.Solver = await SwellSolver.Create(Host.Device, Host.Sea, { Gaussian: s.Gaussian, FoamSize: tier.FoamSize, FoamSpacing: tier.FoamSpacing });
-    Host.Horizon.AttachSea(Host.Sea, Host.Solver, tier.Grid, tier.Cell);
+    if (Host.Sea.Shoal.Scene !== Scenes.Sea)
+    {
+        Host.Shoal = await ShoalSolver.Create(Host.Device, Host.Sea, Host.Solver, { Size: Host.Sea.Shoal.Size, Cell: Host.Sea.Shoal.Cell });
+        Host.Solver.AttachShoal(Host.Shoal);
+    }
+    Host.Horizon.AttachSea(Host.Sea, Host.Solver, tier.Grid, tier.Cell, Host.Shoal);
+    if (Host.Shoal && Host.Sea.Scene === Scenes.RunUp && s.Yaw === null)
+    {
+        // Stand offshore, look along +x at the beach, high enough to see the run-up tongue.
+        Host.Horizon.Camera.X = Host.Sea.Shoal.Shore[0] - 90.0;
+        Host.Horizon.Camera.Y = 0.0;
+        Host.Horizon.Camera.Yaw = 0.0;
+        Host.Horizon.Camera.Height = Math.max(Host.Horizon.Camera.Height, 8.0);
+        Host.Horizon.Camera.Pitch = -8.0 * Math.PI / 180.0;
+    }
     Host.Metrics.Reset();
     Host.Accumulator = 0.0;
     Host.LastStamp   = performance.now();
     Host.Ticks = 0; Host.Dropped = 0; Host.Proofs = []; Host.Failures = []; Host.Finished = false; Host.TraceHash = null; Host.LastProofTick = 0; Host.Gate = false;
     Host.ModeTrace = [];
     Host.FoamFired = false;
+    Host.BoresSeen = false;
     Host.Running = true;
     E.pause.textContent = "Pause";
     E.proofs.textContent = "";
     const sea = Host.Sea, spectrum = Host.Solver.Spectrum;
     const bands = sea.Bands.map((b, i) => { const [lo, hi] = BandWindow(sea, i); return `${b.Length.toFixed(0)} m @ ${b.Spacing} m → λ ${lo.toFixed(2)}–${hi.toFixed(0)} m`; });
     const hs = 4.0 * Math.sqrt(spectrum.Total);
-    Host.Recipe = `${sea.BandCount} × ${sea.Size}² · ${sea.Foam ? `foam ${tier.FoamSize}² @ ${tier.FoamSpacing} m` : "no foam"} · grid ${tier.Grid}² @ ${tier.Cell} m`;
+    const shoalText = Host.Shoal ? ` · shoal ${Host.Shoal.Size}² @ ${Host.Shoal.Cell} m × ${Host.Shoal.SubSteps} sub-steps` : "";
+    Host.Recipe = `${sea.BandCount} × ${sea.Size}² · ${sea.Foam ? `foam ${tier.FoamSize}² @ ${tier.FoamSpacing} m` : "no foam"} · grid ${tier.Grid}² @ ${tier.Cell} m${shoalText}`;
+    E.shoal.textContent = Host.Shoal
+        ? (sea.Scene === Scenes.RunUp
+            ? `run-up basin: solitary wave H ${sea.Shoal.WaveHeight} m in d ${sea.Shoal.Depth} m (H/d ${(sea.Shoal.WaveHeight / sea.Shoal.Depth).toFixed(4)}) on a 1:${(1 / sea.Shoal.Slope).toFixed(2)} beach → Synolakis R ${SynolakisRunUp(sea.Shoal.WaveHeight, sea.Shoal.Depth, sea.Shoal.Slope).RunUp.toFixed(3)} m`
+            : `${sea.Scene === Scenes.Shore ? `beach 1:${(1 / sea.Shoal.Slope).toFixed(0)} with bar ${sea.Shoal.BarHeight} m and cusps` : "flat floor"} · depth ${sea.Shoal.Depth} m · sponge ${sea.Shoal.Sponge} cells · Manning ${sea.Shoal.Manning}`)
+        : "off (scene=open | shore | runup)";
     E.sea.textContent = sea.Scene === Scenes.Mode
         ? `single wave λ ${sea.Mode.Wavelength.toFixed(2)} m · A ${sea.Mode.Amplitude} m · ak ${sea.Mode.Steepness.toFixed(3)} · ω ${sea.Mode.Omega.toFixed(4)} rad/s · c ${sea.Mode.PhaseSpeed.toFixed(3)} m/s\n${bands.join("\n")}`
         : `Hs ${hs.toFixed(2)} m (prescribed) · peak λ ${PeakWavelength(sea).toFixed(0)} m · Tp ${(2 * Math.PI / sea.PeakOmega).toFixed(1)} s · ${(sea.WindAngle * 180 / Math.PI).toFixed(0)}° · ${Host.Recipe}\n${bands.join("\n")}`;
@@ -229,7 +274,7 @@ function Pulse(stamp)
         return;
     }
     const finishing = Host.Settings.Seconds > 0 && (Host.Ticks + ticks) * TickSeconds >= Host.Settings.Seconds;
-    if (finishing && Host.Solver.StagingBusy)
+    if (finishing && (Host.Solver.StagingBusy || Host.Shoal?.StagingBusy))
     {
         return;
     }
@@ -242,7 +287,16 @@ function Pulse(stamp)
     for (let t = 0; t < ticks; t++)
     {
         Host.Solver.Focus(Host.Horizon.Camera.X, Host.Horizon.Camera.Y);
-        Host.Solver.Advance(encoder, TickSeconds, metrics);
+        if (Host.Shoal)
+        {
+            const c = Host.Horizon.Camera, shoal = Host.Sea.Shoal;
+            Host.Shoal.SetFocus(c.X, c.Y);
+            if (shoal.Hull)
+            {
+                Host.Shoal.SetHull(c.X + Math.cos(c.Yaw) * shoal.HullLead, c.Y + Math.sin(c.Yaw) * shoal.HullLead, shoal.HullRadius, shoal.HullHead);
+            }
+        }
+        Host.Solver.Advance(encoder, TickSeconds, metrics, Host.Shoal);       // bands → [shoal] → foam
         Host.Ticks++;
         const lastTick = Host.Settings.Seconds > 0 && Host.Ticks * TickSeconds >= Host.Settings.Seconds;
         const proofDue = Host.Settings.Proof && Host.Ticks - Host.LastProofTick >= ProofInterval;
@@ -252,6 +306,7 @@ function Pulse(stamp)
             if (proofRecorded)
             {
                 Host.LastProofTick = Host.Ticks;
+                Host.Shoal?.RecordProof(encoder, metrics);
             }
         }
         if (lastTick)
@@ -260,7 +315,10 @@ function Pulse(stamp)
         }
     }
     const lastTick = Host.Settings.Seconds > 0 && Host.Ticks * TickSeconds >= Host.Settings.Seconds;
-    Host.Horizon.Present(encoder, Host.Context, metrics);
+    if (Host.Settings.Present || lastTick)
+    {
+        Host.Horizon.Present(encoder, Host.Context, metrics);
+    }
     metrics.End(encoder);
     Host.Device.queue.submit([encoder.finish()]);
     metrics.RecordWall(performance.now() - wallBegin);
@@ -272,11 +330,11 @@ function Pulse(stamp)
     metrics.Collect().then(() => Telemetry());
     if (proofRecorded)
     {
-        Host.Solver.ReadProof().then(record =>
+        Promise.all([Host.Solver.ReadProof(), Host.Shoal ? Host.Shoal.ReadProof() : null]).then(([record, shoal]) =>
         {
             if (record)
             {
-                Judge(record, lastTick);
+                Judge(record, lastTick, shoal);
             }
             if (lastTick)
             {
@@ -300,43 +358,46 @@ function Pulse(stamp)
 //                                                      PROOFS
 //------------------------------------------------------------------------------------------------------------------------
 
-function Judge(record, final)
+function Judge(record, final, shoal = null)
 {
     const sea = Host.Sea;
     const rows = [];
     const Check = (name, ok, detail) => { rows.push(`${ok ? "✅" : "❌"} ${name}: ${detail}`); if (!ok) { Host.Failures.push(`t=${record.Time.toFixed(2)} ${name}: ${detail}`); } };
     const N = sea.Size;
 
-    // Spectrum: the seeded energy per band vs the CPU quadrature, and the total. Prescribed 0 (a band with no waves in its
-    // window, or the mode scene's finer bands) must be seeded 0.
-    let worst = 0.0, detail = [];
-    for (const [i, band] of record.Bands.entries())
+    if (sea.Spectral)
     {
-        const seeded = band.Energy;
-        const error = band.Prescribed > 1.0e-12 ? Math.abs(seeded - band.Prescribed) / band.Prescribed : seeded;
-        worst = Math.max(worst, error);
-        detail.push(`b${i} ${(seeded * 1.0e4).toFixed(2)}/${(band.Prescribed * 1.0e4).toFixed(2)} cm²`);
-    }
-    const totalSeeded = record.Bands.reduce((s, b) => s + b.Energy, 0.0);
-    const totalError = Math.abs(totalSeeded - record.Prescribed) / Math.max(record.Prescribed, 1.0e-12);
-    Check("spectrum", worst < 0.05 && totalError < 0.05, `Σ|h̃0|² vs ∫S dk²: ${detail.join(" · ")} · total ${(totalError * 100).toFixed(2)} % off`);
-
-    // Parseval: the spatial variance of the fp16 height texture vs the spectral sum this tick.
-    let parsevalWorst = 0.0;
-    const parseval = [];
-    for (const [i, band] of record.Bands.entries())
-    {
-        if (band.Spectral > 1.0e-12)
+        // Spectrum: the seeded energy per band vs the CPU quadrature, and the total. Prescribed 0 (a band with no waves in
+        // its window, or the mode scene's finer bands) must be seeded 0.
+        let worst = 0.0, detail = [];
+        for (const [i, band] of record.Bands.entries())
         {
-            const error = Math.abs(band.Variance - band.Spectral) / band.Spectral;
-            parsevalWorst = Math.max(parsevalWorst, error);
-            parseval.push(`b${i} ${(band.Variance * 1.0e4).toFixed(2)}/${(band.Spectral * 1.0e4).toFixed(2)} cm²`);
+            const seeded = band.Energy;
+            const error = band.Prescribed > 1.0e-12 ? Math.abs(seeded - band.Prescribed) / band.Prescribed : seeded;
+            worst = Math.max(worst, error);
+            detail.push(`b${i} ${(seeded * 1.0e4).toFixed(2)}/${(band.Prescribed * 1.0e4).toFixed(2)} cm²`);
         }
-    }
-    Check("parseval", parsevalWorst < 0.02, `mean h² vs Σ|ĥ(k,t)|²: ${parseval.join(" · ")} · worst ${(parsevalWorst * 100).toFixed(2)} % · Hs now ${record.SignificantHeight.toFixed(2)} m (prescribed ${(4.0 * Math.sqrt(record.Prescribed)).toFixed(2)} m)`);
+        const totalSeeded = record.Bands.reduce((s, b) => s + b.Energy, 0.0);
+        const totalError = Math.abs(totalSeeded - record.Prescribed) / Math.max(record.Prescribed, 1.0e-12);
+        Check("spectrum", worst < 0.05 && totalError < 0.05, `Σ|h̃0|² vs ∫S dk²: ${detail.join(" · ")} · total ${(totalError * 100).toFixed(2)} % off`);
 
-    const hsBound = 4.0 * Math.sqrt(Math.max(record.Prescribed, record.TotalVariance)) * 4.0 + 1.0;
-    Check("finite", record.NonFinite === 0 && Number.isFinite(record.TotalVariance) && record.MaxHeight < hsBound, `non-finite ${record.NonFinite} · max |h| ${record.MaxHeight.toFixed(2)} m (bound ${hsBound.toFixed(1)} m)`);
+        // Parseval: the spatial variance of the fp16 height texture vs the spectral sum this tick.
+        let parsevalWorst = 0.0;
+        const parseval = [];
+        for (const [i, band] of record.Bands.entries())
+        {
+            if (band.Spectral > 1.0e-12)
+            {
+                const error = Math.abs(band.Variance - band.Spectral) / band.Spectral;
+                parsevalWorst = Math.max(parsevalWorst, error);
+                parseval.push(`b${i} ${(band.Variance * 1.0e4).toFixed(2)}/${(band.Spectral * 1.0e4).toFixed(2)} cm²`);
+            }
+        }
+        Check("parseval", parsevalWorst < 0.02, `mean h² vs Σ|ĥ(k,t)|²: ${parseval.join(" · ")} · worst ${(parsevalWorst * 100).toFixed(2)} % · Hs now ${record.SignificantHeight.toFixed(2)} m (prescribed ${(4.0 * Math.sqrt(record.Prescribed)).toFixed(2)} m)`);
+
+        const hsBound = 4.0 * Math.sqrt(Math.max(record.Prescribed, record.TotalVariance)) * 4.0 + 1.0;
+        Check("finite", record.NonFinite === 0 && Number.isFinite(record.TotalVariance) && record.MaxHeight < hsBound, `non-finite ${record.NonFinite} · max |h| ${record.MaxHeight.toFixed(2)} m (bound ${hsBound.toFixed(1)} m)`);
+    }
 
     if (sea.Scene === Scenes.Mode)
     {
@@ -389,11 +450,58 @@ function Judge(record, final)
             try { localStorage.setItem(key, JSON.stringify({ Wind: sea.Wind, Mean: f.Mean, Coverage: f.Coverage })); } catch (error) { /* private mode */ }
         }
     }
-    Host.Proofs.push({ ...record, Rows: rows });
+    if (shoal)
+    {
+        JudgeShoal(shoal, final, rows, Check);
+    }
+    Host.Proofs.push({ ...record, Shoal: shoal, Rows: rows });
     const bands = record.Bands.map((b, i) => `b${i} σ ${(Math.sqrt(b.Variance) * 100).toFixed(1)} cm`).join(" · ");
-    const summary = `Hs ${record.SignificantHeight.toFixed(2)} m · ${bands}` + (record.Foam ? ` · foam ${(record.Foam.Coverage * 100).toFixed(1)} %` : "");
+    const summary = `Hs ${record.SignificantHeight.toFixed(2)} m · ${bands}` + (record.Foam ? ` · foam ${(record.Foam.Coverage * 100).toFixed(1)} %` : "")
+                  + (shoal ? ` · shoal η ${shoal.MaxEta.toFixed(2)} m |u| ${shoal.MaxSpeed.toFixed(2)} m/s wet ${(100 * shoal.Wet / shoal.Cells).toFixed(1)} % K ${shoal.Kinetic.toFixed(0)} bores ${shoal.Bores.toFixed(1)}` : "");
     Host.Elements.proofs.textContent = `t = ${record.Time.toFixed(2)} s · tick ${record.Tick}\n` + rows.join("\n") + "\n" + summary;
     console.log(`[Project-Ocean] proof t=${record.Time.toFixed(2)} ${rows.every(r => r.startsWith("✅") || r.startsWith("ℹ️")) ? "ok" : "FAIL"} · ${summary}`);
+}
+
+function JudgeShoal(p, final, rows, Check)
+{
+    const sea = Host.Sea, shoal = sea.Shoal;
+    const closed = shoal.Sponge <= 0.0;
+    if (closed)
+    {
+        const drift = Math.abs(p.Volume - p.InitialVolume) / p.InitialVolume;
+        Check("volume", drift < 1.0e-4, `${p.Volume.toFixed(1)} m³ vs ${p.InitialVolume.toFixed(1)} m³ at start (drift ${(drift * 100).toExponential(2)} %)`);
+    }
+    const etaBound = 3.0 * shoal.WaveHeight + 4.0 * Math.sqrt(Host.Solver.Spectrum.Total) + shoal.Berm + 1.0;
+    Check("shoal-finite", p.NonFinite === 0 && p.MaxSpeed <= shoal.SpeedCap + 1.0e-3 && p.MaxEta < etaBound,
+          `non-finite ${p.NonFinite} · max |u| ${p.MaxSpeed.toFixed(2)} m/s (cap ${shoal.SpeedCap}) · max η ${p.MaxEta.toFixed(2)} m · wet ${(100 * p.Wet / p.Cells).toFixed(1)} % · kinetic ${p.Kinetic.toFixed(0)} m⁵/s²`);
+    if (sea.Scene === Scenes.RunUp)
+    {
+        const law = SynolakisRunUp(shoal.WaveHeight, shoal.Depth, shoal.Slope);
+        const resolution = shoal.Cell / shoal.Depth;
+        const tolerance = 0.05 + 0.5 * resolution;
+        const error = (p.MaxSurface - law.RunUp) / law.RunUp;
+        const text = `max wet surface ${p.MaxSurface.toFixed(4)} m (wet bed ${p.MaxRunUp.toFixed(3)} m) vs Synolakis ${law.RunUp.toFixed(4)} m · R/d ${(p.MaxSurface / shoal.Depth).toFixed(4)} vs ${(law.RunUp / shoal.Depth).toFixed(4)} · ${(error * 100).toFixed(1)} % at Δx/d ${resolution.toFixed(3)} (tolerance ±${(tolerance * 100).toFixed(0)} %)${law.Breaking ? " · beyond the breaking limit — law invalid" : ""}`;
+        if (final)
+        {
+            Check("run-up", Math.abs(error) < tolerance, text);
+        }
+        else
+        {
+            rows.push(`ℹ️ run-up so far: ${text} · now η ${p.MaxEta.toFixed(3)} m — judged at the end`);
+        }
+    }
+    if (sea.Scene === Scenes.Shore)
+    {
+        Host.BoresSeen = Host.BoresSeen || p.Bores > 0.0;
+        if (final && sea.Wind >= 12.0)
+        {
+            Check("bores", Host.BoresSeen, `bore detector fired ${Host.BoresSeen ? "yes" : "no"} (Σ bore now ${p.Bores.toFixed(1)} cell-units at ${sea.Wind} m/s)`);
+        }
+        else
+        {
+            rows.push(`ℹ️ bores: Σ ${p.Bores.toFixed(1)} cell-units${Host.BoresSeen ? " (seen)" : ""}`);
+        }
+    }
 }
 
 function Conclude()
