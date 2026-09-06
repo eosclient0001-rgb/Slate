@@ -12,6 +12,12 @@
 //    (fewer than ψ texels per wavelength are discarded, never aliased) and band 0 additionally owns everything up to L_0,
 //    so the shortest synthesised wave is 2 m on GTX and 0.5 m on RTX.
 //
+//    Fetch: a wind sea stops growing once the dimensionless fetch gF/U² passes ≈ 2×10⁴ (the Pierson–Moskowitz limit;
+//    Hasselmann's 1973 peak-frequency law ω̃p = 22 X̃^(−⅓) meets the fully developed ω̃p ≈ 0.85 there — Holthuijsen 2007
+//    §6.3). Beyond it JONSWAP would keep lowering the peak and raising the energy without bound, so the effective fetch is
+//    capped: a 2 m/s breeze over 200 km gives Hs 0.1 m, not 0.8 m. (γ = 3.3 still overshoots PM's energy by ≈ 40 % at the
+//    cap; a mature-sea γ → 1 would close that and is left for later.)
+//
 //    Units: metres, seconds, radians; +Z up; wind angle measured from +X toward +Y; waves travel WITH the wind.
 
 export const Tiers = Object.freeze({
@@ -81,10 +87,19 @@ export const DefaultSea = Object.freeze({
     SunAzimuth:  145.0,     // [deg]  relative to the wind direction — ahead of the default upwind camera, glitter path in view
 });
 
+// Fetch [m] at which the sea driven by `wind` is fully developed (Pierson–Moskowitz limit gF/U² ≈ 2×10⁴).
+export function FullyDevelopedFetch(wind, gravity = DefaultSea.Gravity)
+{
+    const u = Math.max(wind, 0.5);
+    return 2.0e4 * u * u / gravity;
+}
+
 export function DescribeSea(overrides = {})
 {
     const p    = { ...DefaultSea, ...overrides };
     const tier = Tiers[p.Tier] ?? Tiers.gtx;
+    const fetchRequested = p.Fetch * 1000.0;                                  // [m]
+    const fetchMetres    = Math.min(fetchRequested, FullyDevelopedFetch(p.Wind, p.Gravity));
     const bandCount = Clamp(Math.round(p.Bands ?? tier.Bands), 1, 4);
     const size      = PowerOfTwo(p.Size ?? tier.Size, 64, 1024);
     const spacing   = p.Spacing ?? tier.Spacing;           // [m] finest texel
@@ -134,7 +149,7 @@ export function DescribeSea(overrides = {})
         BandCount: bandCount,
         Size: size,
         Psi: psi,
-        Wind: p.Wind, FetchMetres: p.Fetch * 1000.0, Depth: p.Depth, Swell: Clamp(p.Swell, 0.0, 1.0),
+        Wind: p.Wind, FetchMetres: fetchMetres, FetchRequested: fetchRequested, Depth: p.Depth, Swell: Clamp(p.Swell, 0.0, 1.0),
         WindAngle: windAngle, Choppiness: p.Choppiness, Gamma: p.Gamma, Gravity: p.Gravity, Seed: p.Seed,
         Foam: !!p.Foam, JThreshold: p.JThreshold, AzGamma: p.AzGamma, FoamDecay: p.FoamDecay, FoamRate: p.FoamRate,
         Scene: mode ? Scenes.Mode : (shoalScene ?? Scenes.Sea),
@@ -147,8 +162,8 @@ export function DescribeSea(overrides = {})
         Camera: Object.freeze({ Height: Math.max(1.5, p.Height), Pitch: p.Pitch * Math.PI / 180.0,
                                 Yaw: (p.Yaw === null || p.Yaw === undefined ? p.Angle + 180.0 : p.Yaw) * Math.PI / 180.0 }),
         Sun: Object.freeze({ Elevation: p.SunElevation * Math.PI / 180.0, Azimuth: windAngle + p.SunAzimuth * Math.PI / 180.0 }),
-        // JONSWAP peak for the display and the sanity bounds (fetch-limited Hasselmann 1973)
-        PeakOmega: 22.0 * Math.pow(p.Gravity * p.Gravity / (Math.max(p.Wind, 0.5) * p.Fetch * 1000.0), 1.0 / 3.0),
+        // JONSWAP peak for the display and the sanity bounds (fetch-limited Hasselmann 1973, fetch capped at full development)
+        PeakOmega: 22.0 * Math.pow(p.Gravity * p.Gravity / (Math.max(p.Wind, 0.5) * fetchMetres), 1.0 / 3.0),
     });
 }
 

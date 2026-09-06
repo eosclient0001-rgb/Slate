@@ -76,7 +76,8 @@ export class HorizonProjection
     }
 
     // Binds the solver's textures (two groups: the foam window ping-pongs; the patch view is refreshed per frame).
-    AttachSea(sea, solver, grid, cell, shoal = null)
+    // keepCamera: a live rebuild (tier / foam changed under the user) keeps the camera where the user steered it.
+    AttachSea(sea, solver, grid, cell, shoal = null, keepCamera = false)
     {
         this.Sea = sea;
         this.Solver = solver;
@@ -102,9 +103,12 @@ export class HorizonProjection
         this.Indices = this.Device.createBuffer({ label: "GridIndices", size: indices.byteLength, usage: GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST });
         this.Device.queue.writeBuffer(this.Indices, 0, indices);
         this.IndexCount = indices.length;
-        this.Camera.Height = sea.Camera.Height;
-        this.Camera.Pitch  = sea.Camera.Pitch;
-        this.Camera.Yaw    = sea.Camera.Yaw;
+        if (!keepCamera)
+        {
+            this.Camera.Height = sea.Camera.Height;
+            this.Camera.Pitch  = sea.Camera.Pitch;
+            this.Camera.Yaw    = sea.Camera.Yaw;
+        }
     }
 
     BuildGroups()

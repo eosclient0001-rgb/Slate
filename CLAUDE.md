@@ -140,6 +140,9 @@ bash Projects/Project-Fluid/Build/ToolchainSequence.sh --port 8765              
   `scene=sea|mode|open|shore|runup`, `wavelength`, `amplitude`, `gaussian=1`, `shoalsize`, `shoalcell`, `slope`, `shoaldepth`, `runupdepth`,
   `waveratio`, `sponge`, `manning`, `bar`, `hull=0|1`, `head`, `view=0…5`, `height`, `pitch`, `yaw`, `seconds`, `proof=1`, `fixed=1`,
   `perkernel=1`, `offscreen=1`, `present=0`; exit in `window.ProjectOceanExit` (0/2/1)
+- Controls apply live: wind / fetch / depth / swell / choppiness re-seed the running bands in place (`SwellSolver.Reseed`, same lattice,
+  phases continue — the sea morphs); tier / scene / foam rebuild (camera kept); Restart = fresh clock + camera. Fetch is capped at
+  the fully developed sea (gF/U² = 2×10⁴, `FullyDevelopedFetch`), so a 2 m/s breeze over 200 km gives Hs 0.1 m, not 0.8 m
 - Proofs: spectrum (Σ|h̃0|² = ∫S dk² per band ±5 %), parseval (mean h² = Σ|ĥ|² ±2 %), dispersion (`scene=mode`, ω ±1 %, A ±2 %), finite,
   foam (causal, responsive, monotone in wind via localStorage across runs); tier 2: volume (closed run-up basin, drift < 1e-4 over 60 s),
   run-up (`scene=runup`, Synolakis R/d = 2.831 √cot β (H/d)^{5/4} within 5 % + 0.5 Δx/d), shoal-finite, bores (`scene=shore`, wind ≥ 12);

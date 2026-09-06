@@ -199,21 +199,51 @@ export class SwellSolver
         this.StagingBytes = this.FoamOffset + this.FoamSize * 32;
         this.Staging      = Make("ProofStaging", this.StagingBytes, S.MAP_READ | S.COPY_DST);
         this.StagingBusy  = false;
+        this.Destroyed    = false;
         this.ProofRecorded = false;
         this.LastProof    = null;
 
-        this.Spectrum = sea.Spectral ? this.PrescribedVariance() : { Bands: new Array(B).fill(0.0), Total: 0.0, Slope: new Array(B).fill(0.0), LambdaMin: sea.Bands.map(b => 2.0 * Math.PI / b.MaxK) };
+        this.Spectrum = sea.Spectral ? this.PrescribedVariance() : this.EmptySpectrum();
         this.WriteSea(0.0, 1.0 / 60.0);
-        if (sea.Spectral)
+        this.SeedSpectrum();
+    }
+
+    // Seeds h̃0(k) for every band from the current description (a no-op for the run-up basin, which has no spectral sea).
+    SeedSpectrum()
+    {
+        if (!this.Sea.Spectral)
         {
-            const encoder = device.createCommandEncoder({ label: "SeaInit" });
-            const pass = encoder.beginComputePass({ label: "SpectrumInit" });
-            pass.setPipeline(this.Kernels.SpectrumInit);
-            pass.setBindGroup(0, this.Group);
-            pass.dispatchWorkgroups(Math.ceil(N / Tile), Math.ceil(N / Tile), B);
-            pass.end();
-            device.queue.submit([encoder.finish()]);
+            return;
         }
+        const N = this.Size, B = this.Bands;
+        const encoder = this.Device.createCommandEncoder({ label: "SeaInit" });
+        const pass = encoder.beginComputePass({ label: "SpectrumInit" });
+        pass.setPipeline(this.Kernels.SpectrumInit);
+        pass.setBindGroup(0, this.Group);
+        pass.dispatchWorkgroups(Math.ceil(N / Tile), Math.ceil(N / Tile), B);
+        pass.end();
+        this.Device.queue.submit([encoder.finish()]);
+    }
+
+    EmptySpectrum()
+    {
+        const B = this.Bands;
+        return { Bands: new Array(B).fill(0.0), Total: 0.0, Slope: new Array(B).fill(0.0), LambdaMin: this.Sea.Bands.map(b => 2.0 * Math.PI / b.MaxK) };
+    }
+
+    // Re-describes the running sea in place — wind, fetch, depth, swell, choppiness, seed — on the same lattice (size,
+    // bands, scene, foam), so every buffer, texture and pipeline is kept: h̃0 is re-seeded from the new spectrum and the
+    // CPU quadrature redone. The phases continue from the current time, so the surface morphs instead of jumping.
+    Reseed(sea)
+    {
+        if (sea.Size !== this.Size || sea.BandCount !== this.Bands || sea.Foam !== this.FoamEnabled || sea.Spectral !== this.Sea.Spectral)
+        {
+            throw new Error("SwellSolver.Reseed: the lattice changed — create a new solver instead");
+        }
+        this.Sea = sea;
+        this.Spectrum = sea.Spectral ? this.PrescribedVariance() : this.EmptySpectrum();
+        this.WriteSea(this.Time, 1.0 / 60.0);
+        this.SeedSpectrum();
     }
 
     //--------------------------------------------------------------------------------------------------------------------
@@ -394,11 +424,19 @@ export class SwellSolver
         catch (error)
         {
             this.StagingBusy = false;
+            if (this.Destroyed)
+            {
+                this.Staging.destroy();
+            }
             return null;
         }
         const words = new Float32Array(this.Staging.getMappedRange().slice(0));
         this.Staging.unmap();
         this.StagingBusy = false;
+        if (this.Destroyed)
+        {
+            this.Staging.destroy();
+        }
 
         const N = this.Size, B = this.Bands, sea = this.Sea;
         const bands = [];
@@ -473,11 +511,13 @@ export class SwellSolver
             }
             else
             {
-                const dk = band.DeltaK;
-                for (let y = 0; y < N; y++)
+                // Only the texels inside the band's window |k| < MaxK carry energy: a quarter of the plane, so the loop
+                // stays on that square (the density is exactly 0 outside — the sum is unchanged, the time is not).
+                const dk = band.DeltaK, reach = Math.min(N / 2, Math.ceil(band.MaxK / dk) + 1);
+                for (let y = N / 2 - reach; y < N / 2 + reach; y++)
                 {
                     const ky = (y - N / 2) * dk;
-                    for (let x = 0; x < N; x++)
+                    for (let x = N / 2 - reach; x < N / 2 + reach; x++)
                     {
                         const kx = (x - N / 2) * dk;
                         const s = Density(sea, kx, ky, b) * dk * dk;
@@ -494,11 +534,17 @@ export class SwellSolver
         return result;
     }
 
+    // A proof readback still mapping keeps its staging buffer until it unmaps (destroying under mapAsync is a GPU error).
     Destroy()
     {
-        for (const b of [this.Constants, this.Initial, this.Spectral, this.Pong, this.Partials, this.FoamPartials, this.Staging]) { b.destroy(); }
+        this.Destroyed = true;
+        for (const b of [this.Constants, this.Initial, this.Spectral, this.Pong, this.Partials, this.FoamPartials]) { b.destroy(); }
         for (const t of [this.Displacement, this.Derivative, this.Motion, ...this.FoamTextures, this.ShoalStandIn.Texture]) { t.destroy(); }
         this.ShoalStandIn.Constants.destroy();
+        if (!this.StagingBusy)
+        {
+            this.Staging.destroy();
+        }
     }
 }
 

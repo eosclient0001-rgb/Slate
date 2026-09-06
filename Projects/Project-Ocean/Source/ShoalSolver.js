@@ -90,6 +90,7 @@ export class ShoalSolver
         this.Partials  = device.createBuffer({ label: "ShoalPartials", size: this.Size * 32, usage: S.STORAGE | S.COPY_SRC });
         this.Staging   = device.createBuffer({ label: "ShoalStaging", size: this.Size * 32, usage: S.MAP_READ | S.COPY_DST });
         this.StagingBusy = false;
+        this.Destroyed   = false;
         this.ProofRecorded = false;
         this.Textures = [0, 1].map(i => device.createTexture({ label: `ShoalState${i}`, size: [this.Size, this.Size], format: "rgba32float",
                                                                 usage: T.STORAGE_BINDING | T.TEXTURE_BINDING }));
@@ -165,6 +166,14 @@ export class ShoalSolver
         }
         i.set([shift[0], shift[1], 0, 0], 40);
         this.Device.queue.writeBuffer(this.Constants, 0, words);
+    }
+
+    // Same scene and patch, new wind / fetch / depth: the handover depth and the band amplitudes are re-read from the new
+    // description at the next WriteShoal; the water in the patch carries on and relaxes toward the re-seeded bands.
+    Reseed(sea)
+    {
+        this.Sea   = sea;
+        this.Shoal = sea.Shoal;
     }
 
     SetFocus(x, y)
@@ -251,11 +260,19 @@ export class ShoalSolver
         catch (error)
         {
             this.StagingBusy = false;
+            if (this.Destroyed)
+            {
+                this.Staging.destroy();
+            }
             return null;
         }
         const words = new Float32Array(this.Staging.getMappedRange().slice(0));
         this.Staging.unmap();
         this.StagingBusy = false;
+        if (this.Destroyed)
+        {
+            this.Staging.destroy();
+        }
         let depth = 0.0, maxEta = -1.0e9, wet = 0, bad = 0, runUp = -1.0e9, kinetic = 0.0, bores = 0.0, maxSpeed = 0.0;
         for (let row = 0; row < this.Size; row++)
         {
@@ -277,10 +294,16 @@ export class ShoalSolver
         };
     }
 
+    // A proof readback still mapping keeps its staging buffer until it unmaps (destroying under mapAsync is a GPU error).
     Destroy()
     {
-        for (const b of [this.Constants, this.Partials, this.Staging]) { b.destroy(); }
+        this.Destroyed = true;
+        for (const b of [this.Constants, this.Partials]) { b.destroy(); }
         for (const t of this.Textures) { t.destroy(); }
+        if (!this.StagingBusy)
+        {
+            this.Staging.destroy();
+        }
     }
 }
 

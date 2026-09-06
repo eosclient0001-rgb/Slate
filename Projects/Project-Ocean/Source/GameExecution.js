@@ -7,6 +7,10 @@
 //    wall time into 1/60 s ticks, each tick advances the sea, presents, and every 30 ticks records a proof read back without
 //    stalling. Fixed mode (proof mode) gates the next tick on the GPU finishing the previous one.
 //
+//    Controls apply live: wind, fetch, depth, swell and choppiness re-seed the running bands in place (Apply — same
+//    lattice, phases continue, so the sea morphs); tier, scene and foam change the lattice and rebuild (Restart, camera
+//    kept); the Restart button rebuilds from the UI with a fresh clock and camera. View changes are immediate.
+//
 //    Proofs (see SwellSolver.js):
 //        spectrum      per band Σ_k |h̃0|² equals the CPU quadrature of ∫∫S(k)dk² within 5 % (and the total within 5 %)
 //        parseval      mean_x h² equals Σ_k |ĥ(k,t)|² within 2 % (the FFT is an exact inverse DFT; fp16 storage is the error)
@@ -30,7 +34,7 @@
 //        bores         shore scene at wind ≥ 12 m/s: the bore detector fires in the surf zone
 //    Exit status is written to #status and window.ProjectOceanExit (0 pass · 2 proof failed · 1 refusal — no WebGPU).
 
-import { DescribeSea, DefaultSea, Tiers, Scenes, BandWindow, PeakWavelength } from "./OceanStructure.js";
+import { DescribeSea, DefaultSea, Tiers, Scenes, BandWindow, PeakWavelength, FullyDevelopedFetch } from "./OceanStructure.js";
 import { SwellSolver } from "./SwellSolver.js";
 import { ShoalSolver, SynolakisRunUp } from "./ShoalSolver.js";
 import { HorizonProjection } from "./HorizonProjection.js";
@@ -50,6 +54,7 @@ const Host = {
     Settings: null,
     Accumulator: 0.0, LastStamp: 0.0, Dropped: 0, Ticks: 0, Recipe: "",
     Running: true, Finished: false, Proofs: [], Failures: [], TraceHash: null, LastProofTick: 0, Gate: false,
+    Rebuilding: false, RestartPending: null, ApplyPending: false, LoopAlive: false, Generation: 0, AdapterLine: "",
     ModeTrace: [], FoamFired: false, BoresSeen: false, Keys: new Set(),
     Elements: {},
 };
@@ -121,13 +126,21 @@ async function Start()
     E.swell.value = s.Swell; E.choppiness.value = s.Choppiness; E.foam.checked = s.Foam; E.view.value = s.View;
     const Labels = () =>
     {
-        E.windLabel.textContent  = `${parseFloat(E.wind.value).toFixed(1)} m/s (Beaufort ${Beaufort(parseFloat(E.wind.value))})`;
-        E.fetchLabel.textContent = `${E.fetch.value} km`;
+        const wind = parseFloat(E.wind.value), fetch = parseFloat(E.fetch.value), developed = FullyDevelopedFetch(wind) / 1000.0;
+        E.windLabel.textContent  = `${wind.toFixed(1)} m/s (Beaufort ${Beaufort(wind)})`;
+        E.fetchLabel.textContent = fetch > developed ? `${E.fetch.value} km → ${developed.toFixed(0)} km (sea fully developed at this wind)` : `${E.fetch.value} km`;
         E.depthLabel.textContent = `${E.depth.value} m`;
     };
-    for (const id of ["wind", "fetch", "depth"]) { E[id].addEventListener("input", Labels); }
+    // Spectral parameters apply live: the bands are re-seeded in place a moment after the last edit (the phases carry on,
+    // so the sea morphs instead of jumping). Tier, scene and foam change the lattice and rebuild; Restart resets the clock.
+    const apply = Debounce(Apply, 150);
+    for (const id of ["wind", "fetch", "depth"]) { E[id].addEventListener("input", () => { Labels(); apply(); }); }
+    for (const id of ["swell", "choppiness"]) { E[id].addEventListener("input", apply); }
+    E.tier.addEventListener("change", () => Restart(true));
+    E.foam.addEventListener("change", () => Restart(true));
+    E.scene.addEventListener("change", () => Restart(false));
     Labels();
-    E.restart.addEventListener("click", () => Restart());
+    E.restart.addEventListener("click", () => Restart(false));
     E.pause.addEventListener("click", () => { Host.Running = !Host.Running; E.pause.textContent = Host.Running ? "Pause" : "Resume"; Host.LastStamp = performance.now(); });
     E.csv.addEventListener("click", () => Download("ProjectOcean_Telemetry.csv", Host.Metrics.Csv()));
     E.view.addEventListener("change", () => { if (Host.Horizon) { Host.Horizon.View = parseInt(E.view.value, 10); } });
@@ -161,24 +174,27 @@ async function Start()
     Host.Metrics.PerKernel = Host.Settings.PerKernel;
 
     const info = adapter.info ?? {};
-    Status(`adapter: ${info.vendor ?? "?"} ${info.architecture ?? ""} ${info.description ?? ""} · timestamps ${wantTimestamps ? "on" : "off"} · maxStorage ${(adapter.limits.maxStorageBufferBindingSize / 1048576).toFixed(0)} MiB`);
+    Host.AdapterLine = `adapter: ${info.vendor ?? "?"} ${info.architecture ?? ""} ${info.description ?? ""} · timestamps ${wantTimestamps ? "on" : "off"} · maxStorage ${(adapter.limits.maxStorageBufferBindingSize / 1048576).toFixed(0)} MiB`;
+    Status(Host.AdapterLine);
 
     Host.Horizon = await HorizonProjection.Create(device, E.canvas, Host.Format);
     Host.Horizon.View = Host.Settings.View;
-    await Restart();
-    requestAnimationFrame(Pulse);
+    await Restart(false);
 }
 
-async function Restart()
+function Debounce(action, milliseconds)
+{
+    let handle = 0;
+    return () => { clearTimeout(handle); handle = setTimeout(action, milliseconds); };
+}
+
+// The UI → one immutable sea description (Host.Settings keeps the query-string parameters the UI does not expose).
+function Describe()
 {
     const E = Host.Elements, s = Host.Settings;
     s.Tier = E.tier.value; s.Scene = E.scene.value; s.Wind = parseFloat(E.wind.value); s.Fetch = parseFloat(E.fetch.value);
     s.Depth = parseFloat(E.depth.value); s.Swell = parseFloat(E.swell.value); s.Choppiness = parseFloat(E.choppiness.value); s.Foam = E.foam.checked;
-    Host.Solver?.Destroy();
-    Host.Shoal?.Destroy();
-    Host.Shoal = null;
-    const tier = Tiers[s.Tier];
-    Host.Sea = DescribeSea({
+    return DescribeSea({
         Tier: s.Tier, Bands: s.Bands ?? undefined, Size: s.Size ?? undefined,
         Wind: s.Wind, Fetch: s.Fetch, Depth: s.Depth, Swell: s.Swell, Choppiness: s.Choppiness, Angle: s.Angle, Seed: s.Seed,
         Foam: s.Foam, JThreshold: s.JThreshold, AzGamma: s.AzGamma, FoamDecay: s.FoamDecay, FoamRate: s.FoamRate,
@@ -187,13 +203,64 @@ async function Restart()
         Sponge: s.Sponge, Manning: s.Manning, BarHeight: s.BarHeight, Hull: s.Hull, HullHead: s.HullHead,
         Height: s.Height, Pitch: s.Pitch, Yaw: s.Yaw,
     });
+}
+
+// True when two descriptions share every GPU resource: same textures, buffers and pipelines, only the spectrum differs.
+function SameLattice(a, b)
+{
+    return !!a && !!b && a.Tier === b.Tier && a.Size === b.Size && a.BandCount === b.BandCount && a.Foam === b.Foam
+        && a.Scene === b.Scene && a.Spectral === b.Spectral
+        && a.Shoal.Scene === b.Shoal.Scene && a.Shoal.Size === b.Shoal.Size && a.Shoal.Cell === b.Shoal.Cell;
+}
+
+// Live edit: same lattice → re-seed the running sea in place (no stall, no reset); otherwise rebuild and keep the camera.
+async function Apply()
+{
+    if (Host.Rebuilding || !Host.Solver)
+    {
+        Host.ApplyPending = true;                         // picked up when the rebuild in progress finishes
+        return;
+    }
+    const sea = Describe();
+    if (!SameLattice(sea, Host.Sea) || Host.Finished)
+    {
+        return Restart(true);                             // a finished proof run restarts so the edit is visible
+    }
+    Host.Sea = sea;
+    Host.Generation++;                                    // a proof recorded under the old spectrum is not judged
+    Host.Solver.Reseed(sea);
+    Host.Shoal?.Reseed(sea);
+    Host.Horizon.Sea = sea;
+    Announce();
+}
+
+// Rebuilds the sea from the UI: new solver(s), new clock, proofs cleared. keepCamera leaves the camera where the user
+// steered it (tier / foam toggles); a fresh scene or the Restart button resets it to the scene's default.
+async function Restart(keepCamera = false)
+{
+    if (Host.Rebuilding)
+    {
+        Host.RestartPending = keepCamera;                 // coalesce: one more rebuild after this one, with the latest UI
+        return;
+    }
+    Host.Rebuilding = true;
+    const E = Host.Elements, s = Host.Settings;
+    const tier = Tiers[E.tier.value];
+    const sea = Describe();
+    // Pulse does not encode while Rebuilding, so nothing new references the old buffers; the ticks already submitted keep
+    // them alive inside the implementation until they finish (a proof readback still mapping unmaps first, see Destroy).
+    Host.Solver?.Destroy();
+    Host.Shoal?.Destroy();
+    Host.Shoal = null;
+    Host.Sea = sea;
+    Host.Generation++;
     Host.Solver = await SwellSolver.Create(Host.Device, Host.Sea, { Gaussian: s.Gaussian, FoamSize: tier.FoamSize, FoamSpacing: tier.FoamSpacing });
     if (Host.Sea.Shoal.Scene !== Scenes.Sea)
     {
         Host.Shoal = await ShoalSolver.Create(Host.Device, Host.Sea, Host.Solver, { Size: Host.Sea.Shoal.Size, Cell: Host.Sea.Shoal.Cell });
         Host.Solver.AttachShoal(Host.Shoal);
     }
-    Host.Horizon.AttachSea(Host.Sea, Host.Solver, tier.Grid, tier.Cell, Host.Shoal);
+    Host.Horizon.AttachSea(Host.Sea, Host.Solver, tier.Grid, tier.Cell, Host.Shoal, keepCamera);
     if (Host.Shoal && Host.Sea.Scene === Scenes.RunUp && s.Yaw === null)
     {
         // Stand offshore, look along +x at the beach, high enough to see the run-up tongue.
@@ -213,9 +280,36 @@ async function Restart()
     Host.Running = true;
     E.pause.textContent = "Pause";
     E.proofs.textContent = "";
+    E.status.className = "";
+    E.status.textContent = Host.AdapterLine;
+    Host.Rebuilding = false;
+    Announce();
+    if (!Host.LoopAlive)
+    {
+        Host.LoopAlive = true;                            // first start, or a finished proof run whose loop had stopped
+        requestAnimationFrame(Pulse);
+    }
+    if (Host.RestartPending !== null)
+    {
+        const again = Host.RestartPending;
+        Host.RestartPending = null;
+        return Restart(again);
+    }
+    if (Host.ApplyPending)
+    {
+        Host.ApplyPending = false;                        // edits made while rebuilding
+        return Apply();
+    }
+}
+
+// The sea-state panel: what the solver was given (prescribed Hs, peak, bands, patch).
+function Announce()
+{
+    const E = Host.Elements, tier = Tiers[Host.Sea.Tier];
     const sea = Host.Sea, spectrum = Host.Solver.Spectrum;
     const bands = sea.Bands.map((b, i) => { const [lo, hi] = BandWindow(sea, i); return `${b.Length.toFixed(0)} m @ ${b.Spacing} m → λ ${lo.toFixed(2)}–${hi.toFixed(0)} m`; });
     const hs = 4.0 * Math.sqrt(spectrum.Total);
+    const fetch = sea.FetchMetres < sea.FetchRequested ? ` · fetch ${(sea.FetchMetres / 1000).toFixed(0)} km (fully developed)` : "";
     const shoalText = Host.Shoal ? ` · shoal ${Host.Shoal.Size}² @ ${Host.Shoal.Cell} m × ${Host.Shoal.SubSteps} sub-steps` : "";
     Host.Recipe = `${sea.BandCount} × ${sea.Size}² · ${sea.Foam ? `foam ${tier.FoamSize}² @ ${tier.FoamSpacing} m` : "no foam"} · grid ${tier.Grid}² @ ${tier.Cell} m${shoalText}`;
     E.shoal.textContent = Host.Shoal
@@ -225,7 +319,7 @@ async function Restart()
         : "off (scene=open | shore | runup)";
     E.sea.textContent = sea.Scene === Scenes.Mode
         ? `single wave λ ${sea.Mode.Wavelength.toFixed(2)} m · A ${sea.Mode.Amplitude} m · ak ${sea.Mode.Steepness.toFixed(3)} · ω ${sea.Mode.Omega.toFixed(4)} rad/s · c ${sea.Mode.PhaseSpeed.toFixed(3)} m/s\n${bands.join("\n")}`
-        : `Hs ${hs.toFixed(2)} m (prescribed) · peak λ ${PeakWavelength(sea).toFixed(0)} m · Tp ${(2 * Math.PI / sea.PeakOmega).toFixed(1)} s · ${(sea.WindAngle * 180 / Math.PI).toFixed(0)}° · ${Host.Recipe}\n${bands.join("\n")}`;
+        : `Hs ${hs.toFixed(2)} m (prescribed) · peak λ ${PeakWavelength(sea).toFixed(0)} m · Tp ${(2 * Math.PI / sea.PeakOmega).toFixed(1)} s · ${(sea.WindAngle * 180 / Math.PI).toFixed(0)}°${fetch} · ${Host.Recipe}\n${bands.join("\n")}`;
 }
 
 //------------------------------------------------------------------------------------------------------------------------
@@ -236,10 +330,11 @@ function Pulse(stamp)
 {
     if (Host.Finished)
     {
+        Host.LoopAlive = false;                           // Restart revives it
         return;
     }
     requestAnimationFrame(Pulse);
-    if (!Host.Running)
+    if (!Host.Running || Host.Rebuilding)
     {
         return;
     }
@@ -330,9 +425,14 @@ function Pulse(stamp)
     metrics.Collect().then(() => Telemetry());
     if (proofRecorded)
     {
-        Promise.all([Host.Solver.ReadProof(), Host.Shoal ? Host.Shoal.ReadProof() : null]).then(([record, shoal]) =>
+        const solver = Host.Solver, generation = Host.Generation;
+        Promise.all([solver.ReadProof(), Host.Shoal ? Host.Shoal.ReadProof() : null]).then(([record, shoal]) =>
         {
-            if (record)
+            if (solver !== Host.Solver)
+            {
+                return;                                   // the sea was rebuilt while this readback was in flight
+            }
+            if (record && generation === Host.Generation)  // a live edit re-seeded the sea under this proof: not judged
             {
                 Judge(record, lastTick, shoal);
             }
@@ -434,7 +534,7 @@ function Judge(record, final, shoal = null)
         {
             // Monotone in wind: the mean foam energy must not fall when the wind rises, compared with the last finished run
             // at the same tier / fetch / depth / seed (kept in localStorage, so run wind=6, then 10, then 18).
-            const key = `ProjectOcean.Foam.${sea.Tier}.${sea.Size}.${sea.BandCount}.${sea.FetchMetres}.${sea.Depth}.${sea.Seed}.${Host.Settings.Seconds}`;
+            const key = `ProjectOcean.Foam.${sea.Tier}.${sea.Size}.${sea.BandCount}.${sea.FetchRequested}.${sea.Depth}.${sea.Seed}.${Host.Settings.Seconds}`;
             let previous = null;
             try { previous = JSON.parse(localStorage.getItem(key) ?? "null"); } catch (error) { previous = null; }
             if (previous && Math.abs(previous.Wind - sea.Wind) > 0.1)
