@@ -130,6 +130,10 @@ bash Projects/Project-Fluid/Build/ToolchainSequence.sh --port 8765              
   field-by-field comparison with Unreal Niagara Fluids + material road map (water → honey → mud → snow): `FluidPhaseF1-UnrealComparison.md`;
   adaptive phase (Cirrus + Adaptive PF-FLIP, each as its own effect, then combined; A0 tile oracle done, A1–A5 planned): `FluidPhaseF2-AdaptivePlan.md`
 
+### Project-Ocean (planned — WebGPU large-body-of-water testbed, next after the ocean report)
+- Survey + tiered plan (2023–2026 sources; FFT surface → foam → shoal patch → PB-MPM spray → breakers, each a flag; GTX → RTX profiles):
+  `References/OceanPhaseO0-SurveyAndPlan.md` — sequence set by the user: ocean report → WebGPU ocean → WebGPU smoke & fire → C++ port
+
 ### Linux CMake (IDE integration / non-Windows only)
 ```bash
 cmake -B build && cmake --build build --config Release
