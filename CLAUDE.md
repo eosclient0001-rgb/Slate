@@ -130,9 +130,19 @@ bash Projects/Project-Fluid/Build/ToolchainSequence.sh --port 8765              
   field-by-field comparison with Unreal Niagara Fluids + material road map (water → honey → mud → snow): `FluidPhaseF1-UnrealComparison.md`;
   adaptive phase (Cirrus + Adaptive PF-FLIP, each as its own effect, then combined; A0 tile oracle done, A1–A5 planned): `FluidPhaseF2-AdaptivePlan.md`
 
-### Project-Ocean (planned — WebGPU large-body-of-water testbed, next after the ocean report)
+### Project-Ocean (WebGPU large-body-of-water testbed — phase O1: cascaded-FFT surface + persistent foam)
 - Survey + tiered plan (2023–2026 sources; FFT surface → foam → shoal patch → PB-MPM spray → breakers, each a flag; GTX → RTX profiles):
   `References/OceanPhaseO0-SurveyAndPlan.md` — sequence set by the user: ocean report → WebGPU ocean → WebGPU smoke & fire → C++ port
+- Run: `powershell -File Projects\Project-Ocean\Build\ToolchainSequence.ps1 [-Proof|-Dispersion|-Check|-Port N|-NoBrowser|-Query '…']`
+  or `bash Projects/Project-Ocean/Build/ToolchainSequence.sh [--port N] [--bind 0.0.0.0] [--check]` (port 8766; browser only, no build)
+- Query string: `tier=gtx|rtx` (3 × 256² at 8/2/0.5 m · 4 × 512² at 8/2/0.5/0.125 m), `bands`, `size`, `wind`, `fetch`, `depth`, `swell`, `chop`,
+  `angle`, `seed`, `foam=0|1`, `jthreshold`, `azgamma`, `foamdecay`, `foamrate`, `scene=sea|mode`, `wavelength`, `amplitude`, `gaussian=1`,
+  `view=0…4`, `height`, `pitch`, `yaw`, `seconds`, `proof=1`, `fixed=1`, `perkernel=1`, `offscreen=1`; exit in `window.ProjectOceanExit` (0/2/1)
+- Proofs: spectrum (Σ|h̃0|² = ∫S dk² per band ±5 %), parseval (mean h² = Σ|ĥ|² ±2 %), dispersion (`scene=mode`, ω ±1 %, A ±2 %), finite,
+  foam (causal, responsive, monotone in wind via localStorage across runs) + FNV trace hash; headless: `Scratchpad/OceanHeadlessRun.mjs`
+- Roles: `OceanStructure.js` (tiers, bands, sea state), `SwellSolver.js` + `Shaders/SwellSolver.wgsl` (spectrum, evolution, radix-2 FFT,
+  compose, proofs), `Shaders/FoamSolver.wgsl` (camera-following foam window), `HorizonProjection.js/.wgsl` (warped VS grid, band fade,
+  shading), `Shaders/SeaStructure.wgsl` (shared uniform), `GameExecution.js` (host loop), `TimingMetrics.js`
 
 ### Linux CMake (IDE integration / non-Windows only)
 ```bash

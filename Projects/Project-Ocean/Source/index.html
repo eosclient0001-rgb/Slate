@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<!--
+  Frontier/Projects/Project-Ocean/Source/index.html — Project-Ocean page shell (canvas + controls; all logic in GameExecution.js)
+  Serve the Source/ directory over HTTP (ES modules and fetch() do not load from file://): Build/ToolchainSequence.ps1 / .sh
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Project-Ocean — cascaded FFT sea + foam (WebGPU)</title>
+<style>
+    :root { color-scheme: dark; }
+    html, body { margin: 0; height: 100%; background: #101214; color: #d8dce0; font: 13px/1.45 "Segoe UI", system-ui, sans-serif; }
+    body { display: grid; grid-template-columns: 1fr 360px; grid-template-rows: 100%; }
+    #canvas { width: 100%; height: 100%; display: block; touch-action: none; background: #000; }
+    aside { padding: 12px 14px; overflow: auto; border-left: 1px solid #262a2e; background: #14171a; }
+    h1 { font-size: 15px; margin: 0 0 6px; }
+    h2 { font-size: 12px; margin: 14px 0 4px; color: #9aa4ae; text-transform: uppercase; letter-spacing: 0.06em; }
+    pre { margin: 0; white-space: pre-wrap; font: 12px/1.4 Consolas, "Cascadia Mono", monospace; }
+    label { display: block; margin: 6px 0 2px; color: #b6bec6; }
+    input[type=range] { width: 100%; }
+    select, input[type=number] { width: 100%; box-sizing: border-box; background: #1c2024; color: #e6eaee; border: 1px solid #30363c; padding: 4px 6px; }
+    button { margin: 8px 6px 0 0; padding: 5px 12px; background: #24507a; color: #fff; border: 0; border-radius: 3px; cursor: pointer; }
+    button.secondary { background: #2b3138; }
+    #status { padding: 8px; border-radius: 3px; background: #1a1e22; }
+    #status.pass { background: #163c22; }
+    #status.fail { background: #4a1c1c; }
+    .hint { color: #7f8890; }
+    .row { display: grid; grid-template-columns: 1fr 1fr; gap: 0 10px; }
+</style>
+</head>
+<body>
+<canvas id="canvas"></canvas>
+<aside>
+    <h1>Project-Ocean · open sea</h1>
+    <div class="hint">Cascaded-FFT ocean with persistent whitecap foam, in WebGPU. Drag to look, wheel for height, W/A/S/D or arrows to sail.</div>
+
+    <h2>Status</h2>
+    <pre id="status">starting…</pre>
+
+    <h2>Sea state</h2>
+    <pre id="sea"></pre>
+    <div class="row">
+        <div>
+            <label for="tier">Quality tier</label>
+            <select id="tier">
+                <option value="gtx">GTX — 3 bands × 256²</option>
+                <option value="rtx">RTX — 4 bands × 512²</option>
+            </select>
+        </div>
+        <div>
+            <label for="scene">Scene</label>
+            <select id="scene">
+                <option value="sea">wind sea (JONSWAP/TMA)</option>
+                <option value="mode">single wave (dispersion proof)</option>
+            </select>
+        </div>
+    </div>
+    <label for="wind">Wind U₁₀ <span id="windLabel"></span></label>
+    <input id="wind" type="range" min="2" max="25" step="0.5" value="10">
+    <label for="fetch">Fetch <span id="fetchLabel"></span></label>
+    <input id="fetch" type="range" min="10" max="1000" step="10" value="200">
+    <label for="depth">Depth <span id="depthLabel"></span></label>
+    <input id="depth" type="range" min="2" max="500" step="1" value="200">
+    <div class="row">
+        <div>
+            <label for="swell">Swell</label>
+            <input id="swell" type="number" min="0" max="1" step="0.1" value="0.3">
+        </div>
+        <div>
+            <label for="choppiness">Choppiness ξ</label>
+            <input id="choppiness" type="number" min="0" max="2" step="0.1" value="1.2">
+        </div>
+    </div>
+    <label><input id="foam" type="checkbox" checked> Foam (tier 1 — Jacobian fold or crest acceleration ≤ −0.39 g)</label>
+    <button id="restart">Restart</button>
+    <button id="pause" class="secondary">Pause</button>
+
+    <h2>Rendering</h2>
+    <label for="view">View</label>
+    <select id="view">
+        <option value="0">shaded sea</option>
+        <option value="1">foam energy (red) · breaking mask (green)</option>
+        <option value="2">Jacobian (red = folding, blue = foam threshold)</option>
+        <option value="3">band weights per vertex</option>
+        <option value="4">surface speed</option>
+    </select>
+
+    <h2>Telemetry</h2>
+    <pre id="telemetry">—</pre>
+    <button id="csv" class="secondary">Download CSV</button>
+
+    <h2>Proofs</h2>
+    <pre id="proofs">—</pre>
+    <div class="hint" style="margin-top:10px">
+        Proof run: <code>?seconds=6&amp;proof=1&amp;fixed=1</code> (spectrum energy, Parseval, finite, foam) and
+        <code>?scene=mode&amp;seconds=4&amp;proof=1&amp;fixed=1</code> (dispersion ±1 %). Add <code>&amp;perkernel=1</code> for per-kernel GPU
+        timings, <code>&amp;tier=rtx</code> for 4 × 512², <code>&amp;wind=18</code> for a gale, <code>&amp;foam=0</code> for tier 0 only.
+    </div>
+</aside>
+<script type="module" src="./GameExecution.js"></script>
+</body>
+</html>
