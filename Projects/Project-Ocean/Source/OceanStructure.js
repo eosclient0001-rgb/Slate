@@ -47,7 +47,9 @@ export const DefaultSea = Object.freeze({
     JThreshold:  0.6,       // [-]    foam when the Jacobian folds below this (War Thunder 0.3–0.5 at their ξ; see O1 notes)
     AzGamma:     0.39,      // [-]    …or the vertical acceleration passes −γ g (Chen et al. via Donatini 2024)
     FoamDecay:   4.0,       // [s]    e-folding time of the foam energy
-    FoamRate:    2.5,       // [1/s]  injection rate while the breaking mask fires
+    FoamRate:    16.0,      // [1/s]  injection rate while the breaking mask fires — a texel is under a firing crest for ≈ 0.3 s
+                            //        at strength 0.15–0.5, so 16/s saturates a fresh whitecap (solid white, then lace as it
+                            //        decays); 2.5/s left it at 0.1–0.2 — grey, never white. White fraction ≈ 4 % at 22 m/s.
     Scene:       Scenes.Sea,
     Wavelength:  32.0,      // [m]    mode scene: the single wavelength (snapped to band 0's grid)
     Amplitude:   0.4,       // [m]    mode scene: amplitude A (steepness ak = 2πA/λ ≈ 0.08 — no breaking)
@@ -60,7 +62,7 @@ export const DefaultSea = Object.freeze({
     BarHeight:   1.5,       // [m]    longshore bar height (shore scene)
     BarDistance: 80.0,      // [m]    bar crest seaward of the shoreline
     BarWidth:    25.0,      // [m]    bar Gaussian width
-    CuspAmplitude: 0.4,     // [m]    beach cusps
+    CuspAmplitude: 0.3,     // [m]    beach cusps (shoreline excursion ± amplitude / slope)
     CuspWavelength: 35.0,   // [m]
     ShoreDistance: 120.0,   // [m]    still-water shoreline ahead of the origin, along the wind (waves run onto the beach)
     RunUpDepth:  4.0,       // [m]    run-up scene: still depth d (the benchmark scales with Δx / d: GTX 0.25, RTX 0.125)
@@ -71,7 +73,8 @@ export const DefaultSea = Object.freeze({
     SpeedCap:    15.0,      // [m/s]
     ShallowRatio: 8.0,      // [-]    handover depth = peak λ / this: shallower water belongs to the patch, deeper to the bands
     ForcingCap:  3.0,       // [-]    cap on the depth-averaged velocity factor √tanh(kd) / (kd) of the forcing
-    Hull:        true,      // [-]    open/shore scenes: a hull (moving surface pressure) ahead of the camera
+    Hull:        false,     // [-]    open/shore scenes: a hull (moving surface pressure) ahead of the camera — there is no ship
+                            //        mesh yet, so its wake foam reads as a random white cloud; opt in with hull=1 / the checkbox
     HullRadius:  4.0,       // [m]    hull Gaussian radius
     HullHead:    1.2,       // [m]    hull pressure head (metres of water displaced under it)
     HullLead:    18.0,      // [m]    hull distance ahead of the camera
@@ -159,8 +162,9 @@ export function DescribeSea(overrides = {})
                               PhaseSpeed: modeOmega / modeK, Steepness: modeK * p.Amplitude }),
         Fade: p.Fade, MaxHeight: p.MaxHeight,
         NodeCells: p.NodeCells ?? tier.NodeCells, LodRatio: p.LodRatio ?? tier.LodRatio, LeafCell: p.LeafCell ?? tier.LeafCell,
+        // Default view: upwind into the glitter path — except on the shore, where the surf and the beach lie downwind.
         Camera: Object.freeze({ Height: Math.max(1.5, p.Height), Pitch: p.Pitch * Math.PI / 180.0,
-                                Yaw: (p.Yaw === null || p.Yaw === undefined ? p.Angle + 180.0 : p.Yaw) * Math.PI / 180.0 }),
+                                Yaw: (p.Yaw === null || p.Yaw === undefined ? p.Angle + (p.Scene === Scenes.Shore ? 0.0 : 180.0) : p.Yaw) * Math.PI / 180.0 }),
         Sun: Object.freeze({ Elevation: p.SunElevation * Math.PI / 180.0, Azimuth: windAngle + p.SunAzimuth * Math.PI / 180.0 }),
         // JONSWAP peak for the display and the sanity bounds (fetch-limited Hasselmann 1973, fetch capped at full development)
         PeakOmega: 22.0 * Math.pow(p.Gravity * p.Gravity / (Math.max(p.Wind, 0.5) * fetchMetres), 1.0 / 3.0),

@@ -174,6 +174,10 @@ export class ShoalSolver
     {
         this.Sea   = sea;
         this.Shoal = sea.Shoal;
+        if (!sea.Shoal.Hull)
+        {
+            this.Hull = null;                                 // the hull checkbox went off: lift the pressure patch
+        }
     }
 
     SetFocus(x, y)

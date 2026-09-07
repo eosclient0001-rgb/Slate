@@ -8,8 +8,9 @@
 //           the horizontal displacement (choppiness ξ already folded into the textures) and the vertical acceleration a_z;
 //        2. fires the breaking mask when J < J_threshold (the surface folds — War Thunder / Tessendorf) OR a_z ≤ −γ g
 //           (the crest falls faster than gravity can follow — Chen et al., γ = 0.39 via Donatini 2024);
-//        3. re-samples last tick's foam at the same world position (the window may have shifted), spreads it with a tent
-//           blur, lets it decay with time constant FoamDecay and injects FoamRate · Δτ · strength while the mask fires.
+//        3. re-samples last tick's foam where the water came from (wind drift ≈ 2.5 % U₁₀, the SWE current in the patch;
+//           the window may also have shifted), spreads it with a light tent blur, lets it decay with time constant FoamDecay
+//           and injects FoamRate · Δτ · strength while the mask fires.
 //    Foam lives in undisplaced (grid) space, exactly where HorizonProjection looks it up, so it rides the orbital motion of the
 //    surface for free — no advection pass (inside the tier-2 patch the foam is carried by the SWE current instead).
 //    Channels: R foam energy 0…1 · G acceleration mask (0/1) · B J · A −a_z / g.
@@ -66,17 +67,32 @@ fn FoamAdvance(@builtin(global_invocation_id) id: vec3u)
     // Tier 2: inside the shoal patch, bores (breaking in the shallow-water sense) inject foam; the spectral criteria fade
     // out where the bands themselves fade (shallow water, land), so the foam follows whichever tier owns the surface.
     let weight = PatchWeight(P, world);
-    if (weight > 0.0)
+    let still = -Bed(P, world);
+    if (weight <= 0.0 && P.Wave.w > 1.5)
     {
-        let cell = (world - P.Patch.xy) / P.Patch.z;
-        let state = textureLoad(Patch, vec2u(clamp(cell, vec2f(0.0), vec2f(P.Patch.w - 1.0))), 0);
-        let still = -Bed(P, world);
+        // outside the patch the beach is still there: the spectral criteria fade with the bands and stop on dry sand
         var spectral = 0.0;
         for (var b = 0u; b < U.Grid.z; b++)
         {
             spectral = max(spectral, DepthWeight(P, b, still));
         }
-        strength = strength * mix(1.0, spectral, weight) + weight * 3.0 * state.w;
+        strength *= spectral * select(0.0, 1.0, still > 0.0);
+        mask *= spectral * select(0.0, 1.0, still > 0.0);
+    }
+    if (weight > 0.0)
+    {
+        let cell = (world - P.Patch.xy) / P.Patch.z;
+        let state = textureLoad(Patch, vec2u(clamp(cell, vec2f(0.0), vec2f(P.Patch.w - 1.0))), 0);
+        var spectral = 0.0;
+        for (var b = 0u; b < U.Grid.z; b++)
+        {
+            spectral = max(spectral, DepthWeight(P, b, still));
+        }
+        // Bores inject at 2 × bore (a front saturates in a few ticks; 3 × left the whole surf zone a solid sheet); the swash
+        // (water thinner than 25 cm running over the sand at ≥ 0.3 m/s) injects too, so the tongue and its backwash leave
+        // the wet, foam-flecked sand a beach has.
+        let thin = clamp(1.0 - state.x / 0.25, 0.0, 1.0) * clamp(length(state.yz) / 0.3 - 0.5, 0.0, 1.0);
+        strength = strength * mix(1.0, spectral, weight) + weight * (2.0 * state.w + 0.8 * thin);
         mask = max(mask * mix(1.0, spectral, weight), select(0.0, 1.0, state.w > 0.1));
         if (state.x <= P.Limits.x)
         {
@@ -84,9 +100,11 @@ fn FoamAdvance(@builtin(global_invocation_id) id: vec3u)
         }
     }
 
-    // Inside the patch the foam rides the shallow-water current (semi-Lagrangian: read where the water came from); in
-    // the open sea the FFT surface is Eulerian and the foam stays with the texel as before.
-    var origin = world;
+    // The foam drifts downwind at ≈ 2.5 % of U₁₀ (wind drift + Stokes drift of the surface layer), so dying whitecaps
+    // streak along the wind; inside the patch it rides the shallow-water current instead (semi-Lagrangian: read where the
+    // water came from). The FFT surface's orbital motion is free: foam lives in undisplaced grid space.
+    let drift = 0.025 * U.Wave.z * vec2f(cos(U.Shape.z), sin(U.Shape.z));
+    var origin = world - drift * U.Clock.y;
     if (weight > 0.0)
     {
         let cell = (world - P.Patch.xy) / P.Patch.z;
@@ -101,7 +119,11 @@ fn FoamAdvance(@builtin(global_invocation_id) id: vec3u)
                          textureSampleLevel(Previous, Clamp, previousUv + vec2f(-texel,  texel), 0.0).x +
                          textureSampleLevel(Previous, Clamp, previousUv + vec2f( texel, -texel), 0.0).x +
                          textureSampleLevel(Previous, Clamp, previousUv + vec2f(-texel, -texel), 0.0).x);
-    let carried = mix(centre, spread, U.Previous.z) * inside * exp(-U.Clock.y / U.Foam.z);
+    var carried = mix(centre, spread, U.Previous.z) * inside * exp(-U.Clock.y / U.Foam.z);
+    if (weight <= 0.0 && P.Wave.w > 1.5 && still <= 0.0)
+    {
+        carried = 0.0;                                                            // dry land beyond the patch keeps none
+    }
     let foam = min(1.0, carried + U.Foam.w * U.Clock.y * min(strength, 2.0));
     textureStore(Next, id.xy, vec4f(foam, mask, j, fall));
 }
@@ -118,7 +140,9 @@ fn NonFinite(x: f32) -> bool
     return (bitcast<u32>(x) & 0x7f800000u) == 0x7f800000u;
 }
 
-// Partials[2 row]     = (Σ foam, Σ [−a_z ≥ γ g], Σ [J < J_threshold], Σ [foam > 0.02])   over one row of the window
+// Partials[2 row]     = (Σ foam, Σ [−a_z ≥ γ g], Σ [J < J_threshold], Σ min(1, 1.2 foam))   over one row of the window
+// — the last is the expected white fraction: HorizonProjection covers 1.2 × energy of each texel with foam through the lace,
+// so this is the coverage a photograph would show (Monahan's W), not the area with any energy at all.
 // Partials[2 row + 1] = (non-finite texels, Σ −a_z/g, Σ (a_z/g)², 0)
 @compute @workgroup_size(WG)
 fn MeasureFoam(@builtin(workgroup_id) group: vec3u, @builtin(local_invocation_id) local: vec3u)
@@ -132,7 +156,7 @@ fn MeasureFoam(@builtin(workgroup_id) group: vec3u, @builtin(local_invocation_id
         acc.x += f.x;
         acc.y += f.y;
         acc.z += select(0.0, 1.0, f.z < U.Foam.x);
-        acc.w += select(0.0, 1.0, f.x > 0.02);
+        acc.w += min(1.0, 1.2 * f.x);
         extra.x += select(0.0, 1.0, NonFinite(f.x) || NonFinite(f.z) || NonFinite(f.w));
         extra.y += f.w;
         extra.z += f.w * f.w;

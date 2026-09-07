@@ -47,7 +47,9 @@ export class SwellSolver
     {
         this.Device  = device;
         this.Sea     = sea;
-        this.Options = { Gaussian: false, FoamSize: 512, FoamSpacing: 1.0, Blur: 0.35, ...options };
+        // Blur 0.04: the tent spread per tick — 0.35 turned every crest-shaped whitecap into a round blob within its lifetime
+        // (σ ≈ 9 m after 4 s) and diluted it to grey; 0.04 keeps the crest line white and softens the edge by ≈ 3 m.
+        this.Options = { Gaussian: false, FoamSize: 512, FoamSpacing: 1.0, Blur: 0.04, ...options };
         this.Time    = 0.0;      // [s] simulated seconds
         this.Tick    = 0;
         this.Shoal   = null;     // tier 2, attached later

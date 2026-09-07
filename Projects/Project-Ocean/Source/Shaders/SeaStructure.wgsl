@@ -55,8 +55,10 @@ fn Bed(P: Shoal, p: vec2f) -> f32
         let across = dot(r, vec2f(-P.Shore.w, P.Shore.z));
         let bar = (s + P.Bar.x) / P.Bar.y;
         b += P.Bed.w * exp(-bar * bar);
+        // beach cusps: horns and bays at two incommensurate spacings (λ and 1.618 λ) so the shoreline is not a saw blade
         let cusp = (s - 15.0) / 45.0;
-        b += P.Bar.z * sin(6.28318530718 * across / P.Bar.w) * exp(-cusp * cusp);
+        let phase = 6.28318530718 * across / P.Bar.w;
+        b += P.Bar.z * (0.65 * sin(phase) + 0.35 * sin(phase * 0.618 + 1.3)) * exp(-cusp * cusp);
     }
     return clamp(b, -P.Bed.y, P.Bed.z);
 }

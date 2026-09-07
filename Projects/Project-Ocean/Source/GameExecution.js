@@ -22,10 +22,10 @@
 //        determinism   two runs with the same URL give the same FNV-1a hash of the final proof's row sums
 //
 //    Query string: ?tier=gtx|rtx&bands=3&size=256&wind=10&fetch=200&depth=200&swell=0.3&chop=1.2&angle=30&seed=7
-//                  &foam=1&jthreshold=0.6&azgamma=0.39&foamdecay=4&foamrate=2.5
+//                  &foam=1&jthreshold=0.6&azgamma=0.39&foamdecay=4&foamrate=16
 //                  &scene=sea|mode|open|shore|runup&wavelength=32&amplitude=0.4&gaussian=0
 //                  &shoalsize=256&shoalcell=1&slope=0.05&shoaldepth=20&runupdepth=4&waveratio=0.0185&sponge=12&manning=0.02&bar=1.5
-//                  &hull=1&head=1.2
+//                  &hull=0|1 (default 0: no ship mesh yet)&head=1.2
 //                  &view=0…5&height=6&pitch=-6&yaw=…&seconds=6&proof=1&fixed=1&perkernel=1&offscreen=1&present=0
 //    Tier 2 (scene=open|shore|runup) adds the shallow-water patch (ShoalSolver.js) and its proofs:
 //        volume        run-up basin: Σ h Δx² drifts < 1e-4 relative (closed, exactly conserving flux form)
@@ -91,7 +91,7 @@ function ReadSettings()
         Sponge:     Number_("sponge", DefaultSea.Sponge),
         Manning:    Number_("manning", DefaultSea.Manning),
         BarHeight:  Number_("bar", DefaultSea.BarHeight),
-        Hull:       q.get("hull") !== "0",
+        Hull:       q.has("hull") ? q.get("hull") !== "0" : DefaultSea.Hull,
         HullHead: Number_("head", DefaultSea.HullHead),
         Wavelength: Number_("wavelength", DefaultSea.Wavelength),
         Amplitude:  Number_("amplitude", DefaultSea.Amplitude),
@@ -116,14 +116,14 @@ async function Start()
 {
     const E = Host.Elements;
     for (const id of ["canvas", "status", "telemetry", "proofs", "sea", "tier", "scene", "wind", "windLabel", "fetch", "fetchLabel", "depth", "depthLabel",
-                      "swell", "choppiness", "foam", "restart", "pause", "csv", "view", "shoal"])
+                      "swell", "choppiness", "foam", "hull", "restart", "pause", "csv", "view", "shoal"])
     {
         E[id] = document.getElementById(id);
     }
     Host.Settings = ReadSettings();
     const s = Host.Settings;
     E.tier.value = s.Tier; E.scene.value = s.Scene; E.wind.value = s.Wind; E.fetch.value = s.Fetch; E.depth.value = s.Depth;
-    E.swell.value = s.Swell; E.choppiness.value = s.Choppiness; E.foam.checked = s.Foam; E.view.value = s.View;
+    E.swell.value = s.Swell; E.choppiness.value = s.Choppiness; E.foam.checked = s.Foam; E.hull.checked = s.Hull; E.view.value = s.View;
     const Labels = () =>
     {
         const wind = parseFloat(E.wind.value), fetch = parseFloat(E.fetch.value), developed = FullyDevelopedFetch(wind) / 1000.0;
@@ -138,6 +138,7 @@ async function Start()
     for (const id of ["swell", "choppiness"]) { E[id].addEventListener("input", apply); }
     E.tier.addEventListener("change", () => Restart(true));
     E.foam.addEventListener("change", () => Restart(true));
+    E.hull.addEventListener("change", apply);
     E.scene.addEventListener("change", () => Restart(false));
     Labels();
     E.restart.addEventListener("click", () => Restart(false));
@@ -194,6 +195,7 @@ function Describe()
     const E = Host.Elements, s = Host.Settings;
     s.Tier = E.tier.value; s.Scene = E.scene.value; s.Wind = parseFloat(E.wind.value); s.Fetch = parseFloat(E.fetch.value);
     s.Depth = parseFloat(E.depth.value); s.Swell = parseFloat(E.swell.value); s.Choppiness = parseFloat(E.choppiness.value); s.Foam = E.foam.checked;
+    s.Hull = E.hull.checked;
     return DescribeSea({
         Tier: s.Tier, Bands: s.Bands ?? undefined, Size: s.Size ?? undefined,
         Wind: s.Wind, Fetch: s.Fetch, Depth: s.Depth, Swell: s.Swell, Choppiness: s.Choppiness, Angle: s.Angle, Seed: s.Seed,
@@ -526,7 +528,8 @@ function Judge(record, final, shoal = null)
         Host.FoamFired = Host.FoamFired || firing;
         const causal = Host.FoamFired ? true : f.Mean === 0.0;
         const responsive = (f.MaskFraction + f.FoldedFraction) >= 1.0e-4 ? f.Mean > 0.0 : true;
-        // Monahan & O'Muircheartaigh (1980) whitecap coverage W = 3.84e-6 U₁₀^3.41 is the field reference for the coverage.
+        // Monahan & O'Muircheartaigh (1980) whitecap coverage W = 3.84e-6 U₁₀^3.41 is the field reference for the coverage,
+        // which is measured as the white fraction the renderer draws (Σ min(1, 1.2 energy) / texels), not as "any energy".
         const monahan = 3.84e-6 * Math.pow(sea.Wind, 3.41);
         Check("foam", f.NonFinite === 0 && causal && responsive && f.Mean <= 1.0,
               `coverage ${(f.Coverage * 100).toFixed(2)} % (Monahan ${(monahan * 100).toFixed(2)} % at ${sea.Wind} m/s) · energy ${(f.Mean * 100).toFixed(4)} % · mask −a_z ≥ ${sea.AzGamma} g on ${(f.MaskFraction * 100).toFixed(3)} % · J < ${sea.JThreshold} on ${(f.FoldedFraction * 100).toFixed(3)} % · −a_z/g rms ${f.FallRms.toFixed(3)}${Host.FoamFired ? "" : " · nothing has broken yet"}`);

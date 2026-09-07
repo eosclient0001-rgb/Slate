@@ -104,7 +104,7 @@ fn SurfaceVertex(@builtin(vertex_index) index: u32) -> Surface
     // Tier 2: inside the patch window the shallow-water surface owns the resolvable bands wherever the water is shallow
     // (Handover); the spectral bands keep the rest and fade with depth; the bed shapes both.
     let patchWeight = PatchWeight(P, grid);
-    let bed = Bed(P, grid);
+    let bed = Bed(P, grid) + Backshore(grid);
     let still = -bed;
     let share = patchWeight * Handover(P, still);
     var shoal = vec4f(share, 0.0, bed, 0.0);
@@ -171,6 +171,41 @@ fn Hash(p: vec2f) -> f32
     let q = fract(p * vec2f(0.1031, 0.1030) + vec2f(0.37, 0.11));
     let d = dot(q, q.yx + 33.33);
     return fract((q.x + d) * (q.y + d) * 13.7);
+}
+
+// Smooth value noise in [0, 1] on a 1 m lattice scaled by the caller; two octaves give the foam its lace and the sand its
+// ripples without the per-texel sparkle of the raw hash (which aliases the moment the texel is smaller than a pixel).
+fn Noise(p: vec2f) -> f32
+{
+    let i = floor(p);
+    let f = fract(p);
+    let u = f * f * (3.0 - 2.0 * f);
+    let a = Hash(i);
+    let b = Hash(i + vec2f(1.0, 0.0));
+    let c = Hash(i + vec2f(0.0, 1.0));
+    let d = Hash(i + vec2f(1.0, 1.0));
+    return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
+}
+
+fn Lace(p: vec2f) -> f32
+{
+    return 0.6 * Noise(p) + 0.3 * Noise(p * 2.7 + vec2f(17.0, 9.0)) + 0.1 * Noise(p * 7.1 + vec2f(3.0, 41.0));
+}
+
+// Backshore relief [m] behind the berm (scenes with a beach): a foredune ridge 70–150 m landward of the waterline, 3–5 m
+// above the berm, undulating along the shore at ≈ 60 m so the land is not a plateau. Rendering only — the patch never
+// extends past the berm, so the solver, the foam and the renderer still agree wherever there is water.
+fn Backshore(p: vec2f) -> f32
+{
+    if (P.Wave.w < 1.5 || P.Wave.w > 2.5)
+    {
+        return 0.0;
+    }
+    let r = p - P.Shore.xy;
+    let s = dot(r, P.Shore.zw);                                                    // landward distance [m]
+    let bermStart = P.Bed.z / max(P.Bed.x, 1.0e-4);                                // where Bed() reaches the berm
+    let rise = smoothstep(bermStart + 10.0, bermStart + 90.0, s);
+    return rise * (3.0 + 2.0 * Lace(p * 0.016)) + 0.4 * rise * Lace(p * 0.09);
 }
 
 fn Tonemap(c: vec3f) -> vec3f
@@ -274,16 +309,39 @@ fn SurfaceFragment(in: Surface) -> @location(0) vec4f
     let onLand = P.Wave.w > 1.5 && in.Shoal.y <= P.Limits.x;
     if (onLand)
     {
-        let bedN = normalize(vec3f(-(Bed(P, in.Grid + vec2f(0.5, 0.0)) - Bed(P, in.Grid - vec2f(0.5, 0.0))),
-                                   -(Bed(P, in.Grid + vec2f(0.0, 0.5)) - Bed(P, in.Grid - vec2f(0.0, 0.5))), 1.0));
-        // wet where the swash reaches (foam memory) and just above the waterline; the sand is a dry Lambert surface with a
-        // little grain so the beach is not a flat card
-        let wetness = clamp(1.0 - (in.Shoal.z - V.Eye.w) / 0.8, 0.0, 1.0) * clamp(foam.x * 6.0 + 0.35, 0.0, 1.0);
-        let grain = 0.92 + 0.16 * Hash(floor(in.Grid * 3.0));
-        let sand = mix(vec3f(0.78, 0.68, 0.50), vec3f(0.36, 0.30, 0.21), wetness) * grain;
+        // The beach: a Lambert surface whose normal carries the bed slope plus wind ripples (a 0.3 m wavelength across
+        // the wind, band-limited by the pixel footprint so it fades to flat instead of shimmering at a distance).
+        let ripple = clamp(1.0 - footprint / 0.08, 0.0, 1.0);                     // gone once a pixel spans λ/4
+        let along = dot(in.Grid, vec2f(cos(U.Shape.z), sin(U.Shape.z)));
+        let phase = 6.28318530718 * along / 0.3 + 2.0 * Lace(in.Grid * 0.8);
+        let rippleSlope = 0.12 * ripple * cos(phase) * vec2f(cos(U.Shape.z), sin(U.Shape.z));
+        let e = vec2f(0.5, 0.0);
+        let bE = Bed(P, in.Grid + e) + Backshore(in.Grid + e);
+        let bW = Bed(P, in.Grid - e) + Backshore(in.Grid - e);
+        let bN = Bed(P, in.Grid + e.yx) + Backshore(in.Grid + e.yx);
+        let bS = Bed(P, in.Grid - e.yx) + Backshore(in.Grid - e.yx);
+        let bedN = normalize(vec3f(-(bE - bW) - rippleSlope.x, -(bN - bS) - rippleSlope.y, 1.0));
+        // Wet sand where the swash has just been (the foam memory is exactly that record), plus a saturated band 0.5 m
+        // above the waterline; the wet sand is darker, slightly specular and keeps a thin sheen of water in the hollows.
+        let above = in.Shoal.z - V.Eye.w;
+        let swash = clamp(foam.x * 4.0, 0.0, 1.0);
+        let wetness = max(clamp(1.0 - above / 0.5, 0.0, 1.0), swash * clamp(1.0 - above / 3.0, 0.0, 1.0));
+        let tone = 0.9 + 0.2 * Lace(in.Grid * 0.15);                                 // large-scale colour variation
+        let dry = vec3f(0.74, 0.64, 0.47) * tone;
+        let wet = vec3f(0.30, 0.25, 0.18) * tone;
+        let sand = mix(dry, wet, wetness);
         // the same light budget as the foam (sky ambient + sun), so the beach and the whitecaps sit in one exposure
         let skyUp = Sky(vec3f(0.0, 0.0, 1.0));
-        let lit = sand * (0.3 * skyUp + vec3f(1.0, 0.96, 0.88) * (0.25 + 0.75 * max(dot(bedN, V.Sun.xyz), 0.0)) * V.Sun.w);
+        var lit = sand * (0.3 * skyUp + vec3f(1.0, 0.96, 0.88) * (0.25 + 0.75 * max(dot(bedN, V.Sun.xyz), 0.0)) * V.Sun.w);
+        // wet sand mirrors the sky a little (Fresnel of the water film), dry sand not at all
+        let wetFresnel = wetness * (0.02 + 0.98 * pow(1.0 - max(dot(bedN, v), 0.0), 5.0));
+        var rWet = reflect(-v, bedN);
+        rWet.z = max(rWet.z, 0.02);
+        lit = mix(lit, Sky(normalize(rWet)), 0.6 * wetFresnel);
+        // the swash tongue itself: a film of foam-flecked water where the record is fresh
+        let film = clamp(foam.x * 3.0 - 0.6, 0.0, 1.0) * clamp(1.0 - above / 1.2, 0.0, 1.0);
+        let filmColour = vec3f(0.85, 0.88, 0.9) * (0.35 + 0.65 * max(dot(bedN, V.Sun.xyz), 0.0) * V.Sun.w) * (0.55 + 0.45 * Lace(in.Grid * 1.7));
+        lit = mix(lit, filmColour, film * 0.7);
         let landHaze = 1.0 - exp(-range / V.Centre.z);
         return vec4f(Tonemap(mix(lit, Sky(normalize(vec3f(-v.xy, 0.0))) * 0.98, landHaze)), 1.0);
     }
@@ -320,9 +378,26 @@ fn SurfaceFragment(in: Surface) -> @location(0) vec4f
         colour = mix(colour, mix(water, sandLit, seen) * (1.0 - fresnel) + reflected * fresnel + glint * 0.5, (1.0 - fresnel) * 0.9 * max(max(seen.x, seen.y), seen.z));
     }
 
-    let speckle = Hash(floor(in.Grid * 4.0));
-    let cover = clamp(foam.x * 1.5 - 0.35 * speckle * (1.0 - foam.x), 0.0, 1.0);
-    let foamColour = vec3f(0.9, 0.93, 0.95) * (0.35 + 0.65 * max(dot(n, l), 0.0) * V.Sun.w + 0.3 * ambient);
+    // Foam: the energy is a coverage budget; the lace pattern (two octaves of value noise) decides where inside the patch
+    // the water shows through, so a fading whitecap breaks into streaks and holes instead of a fading grey sheet. Fresh
+    // foam (energy near 1) is solid; below 0.5 it is mostly holes. The pattern is band-limited by the pixel footprint.
+    let detail = clamp(1.0 - footprint / 3.0, 0.0, 1.0);
+    // The covered fraction is ≈ 1.2 × energy (a whitecap is born solid at energy 1 and is half holes 2.8 s later at the
+    // 4 s decay; a surf zone is white only just behind each bore front), and the lace decides which pixels those are.
+    let lace = mix(0.5, smoothstep(0.25, 0.75, Lace(in.Grid * 0.9)), detail);      // stretched to fill 0…1
+    let threshold = 1.0 - clamp(foam.x * 1.2, 0.0, 1.0);
+    var cover = clamp((lace - threshold) / 0.15, 0.0, 1.0) * clamp(foam.x * 5.0, 0.0, 1.0);
+    // Tier 2: the swash tongue — a film of water thinner than 25 cm running over the sand is white with entrained air
+    // wherever it is moving; this is the bright line that draws the waterline of a beach.
+    if (in.Shoal.x > 0.0)
+    {
+        let tongue = clamp(1.0 - in.Shoal.y / 0.25, 0.0, 1.0) * clamp(in.Speed / 0.5, 0.0, 1.0);
+        cover = max(cover, tongue * (0.45 + 0.55 * smoothstep(0.3, 0.7, Lace(in.Grid * 1.7))));
+    }
+    // Sub-surface bubbles under and around the foam: the water goes milky green-white before it goes white.
+    let bubbles = clamp(foam.x * 2.0, 0.0, 1.0) * (1.0 - cover);
+    colour = mix(colour, vec3f(0.35, 0.5, 0.55) * (0.3 + 0.7 * max(dot(n, l), 0.0) * V.Sun.w), 0.35 * bubbles);
+    let foamColour = vec3f(0.9, 0.93, 0.95) * (0.35 + 0.65 * max(dot(n, l), 0.0) * V.Sun.w + 0.3 * ambient) * (0.85 + 0.15 * lace);
     colour = mix(colour, foamColour, cover);
 
     let haze = 1.0 - exp(-range / V.Centre.z);
